@@ -64,7 +64,7 @@ class DavRepository {
    * `423` on write, which is precisely the confusion `lockdiscovery` exists to
    * prevent. Uses the same ancestor set as the guard.
    */
-  private applicableLocks(innerPath: string, base: string): LockDetails[] {
+  private applicableLocks(innerPath: string, hrefBase: string): LockDetails[] {
     const ancestors: string[] = [];
     let cur = innerPath;
     for (;;) {
@@ -95,13 +95,18 @@ class DavRepository {
         depth,
         timeout: String(row['timeout'] ?? ''),
         expiresAt: Number(row['expiresAt'] ?? 0),
-        root: hrefOf(base, lockPath, true),
+        root: hrefOf(hrefBase, lockPath, true),
       });
       return normalized ? [normalized] : [];
     });
   }
 
-  public nodeInfo(innerPath: string, base: string): DavNodeInfo | null {
+  /**
+   * `hrefBase` is the href anchor, never the request's path base — see
+   * `DavBases`. It only ever reaches `hrefOf`, so a `root`-mode bucket reports
+   * root-anchored lock hrefs without affecting any lookup.
+   */
+  public nodeInfo(innerPath: string, hrefBase: string): DavNodeInfo | null {
     const st = this.statInner(innerPath);
     if (!st.exists) return null;
     const meta = this.readMeta(innerPath);
@@ -109,7 +114,7 @@ class DavRepository {
     const crtime = new Date(meta.crtime ?? mtime.getTime());
     let locks: LockDetails[] = [];
     try {
-      locks = this.applicableLocks(innerPath, base);
+      locks = this.applicableLocks(innerPath, hrefBase);
     } catch (error) {
       // Surfaced, not swallowed: a client that cannot see the real lock state
       // will attempt a write and be refused, which is worse than a 500.

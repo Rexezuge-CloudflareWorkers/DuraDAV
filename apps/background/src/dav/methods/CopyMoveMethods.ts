@@ -1,6 +1,7 @@
 import type { DofsFs } from '@durable-dav/dav-store';
 import { createdResponse, getParentPath, isSameOrDescendantPath, parseDestinationPath } from '@durable-dav/webdav';
 import { MAX_PATH_DEPTH, fsPathOf, hrefOf, isValidInnerPath, stripBase } from '../DavContext';
+import type { DavBases } from '../DavContext';
 import type { DavLockGuard } from '../DavLockGuard';
 import type { DavRepository } from '../DavRepository';
 
@@ -30,12 +31,13 @@ type DestinationResolution = { ok: true; destInner: string } | { ok: false; resp
  * Three things are enforced here that neither handler did on its own:
  *
  * 1. `isValidInnerPath(destInner)` plus the `stripBase` contract. `Destination`
- *    is fully client-controlled and the front door forwards it verbatim. The
- *    WHATWG URL parser resolves the header against the request URL and *does*
- *    normalise `%2e%2e`, so `.../photos/%2e%2e/%2e%2e/etc` arrives as the bare
- *    string `etc`; `stripBase` used to accept any single-segment path as
- *    volume-relative, so an escape attempt silently became a successful write
- *    to `<volume>/etc`.
+ *    is fully client-controlled. The front door now canonicalises it to the
+ *    `/owner/volume` form (see `apps/api`'s `davDestination`) and rejects a
+ *    dot-segment on the raw header, so an escape attempt is refused before it
+ *    reaches here. Both checks below are kept as the backstop they now are:
+ *    `stripBase` still refuses a non-base-prefixed single-segment path — which
+ *    is what the WHATWG parser's `%2e%2e` normalisation used to collapse to —
+ *    and `isValidInnerPath` still rejects any `.`/`..` that survived decoding.
  * 2. Self/descendant rejection. `isSameOrDescendantPath` covers equality, so
  *    the question is asked once. The volume root is deliberately *not* a
  *    special case: its descendants are every path in the bucket, and RFC 4918
@@ -44,14 +46,17 @@ type DestinationResolution = { ok: true; destInner: string } | { ok: false; resp
  * 3. A depth cap, so a pathological destination cannot drive an unbounded
  *    path walk downstream.
  */
-function resolveDestination(request: Request, base: string, srcInner: string): DestinationResolution {
+function resolveDestination(request: Request, pathBase: string, srcInner: string): DestinationResolution {
   const bad = { ok: false, response: new Response('Bad Request', { status: 400 }) } as const;
 
   const destHeader = request.headers.get('Destination');
   if (!destHeader) return bad;
   const destFull = parseDestinationPath(destHeader, request.url);
   if (destFull === null) return bad;
-  const destInner = stripBase(destFull, base);
+  // Always the *path* base, in both href modes: the front door has already
+  // rewritten a `root`-mode client's root-relative href into `/owner/volume/...`,
+  // so the DO only ever sees one destination shape.
+  const destInner = stripBase(destFull, pathBase);
   if (destInner === null) return bad;
   if (!isValidInnerPath(destInner)) return bad;
   if (destInner.split('/').length > MAX_PATH_DEPTH) return bad;
@@ -61,13 +66,13 @@ function resolveDestination(request: Request, base: string, srcInner: string): D
 async function handleCopy(
   request: Request,
   innerPath: string,
-  base: string,
+  bases: DavBases,
   repo: DavRepository,
   locks: DavLockGuard,
   dofs: DofsFs,
   removeDestination: (destInner: string, overwriteRequest: Request) => Promise<Response | null>,
 ): Promise<Response> {
-  const destination = resolveDestination(request, base, innerPath);
+  const destination = resolveDestination(request, bases.pathBase, innerPath);
   if (!destination.ok) return destination.response;
   const { destInner } = destination;
   const locked = locks.assertLock(request, destInner);
@@ -118,7 +123,7 @@ async function handleCopy(
         repo.copyMeta(srcChild, dstChild, childStat.isDirectory);
       }
     }
-    return destExists ? new Response(null, { status: 204 }) : createdResponse(hrefOf(base, destInner, true));
+    return destExists ? new Response(null, { status: 204 }) : createdResponse(hrefOf(bases.hrefBase, destInner, true));
   }
   try {
     const buf = dofs.read(fsPathOf(innerPath), {});
@@ -127,19 +132,19 @@ async function handleCopy(
     return new Response('Not Found', { status: 404 });
   }
   repo.copyMeta(innerPath, destInner, false);
-  return destExists ? new Response(null, { status: 204 }) : createdResponse(hrefOf(base, destInner, false));
+  return destExists ? new Response(null, { status: 204 }) : createdResponse(hrefOf(bases.hrefBase, destInner, false));
 }
 
 async function handleMove(
   request: Request,
   innerPath: string,
-  base: string,
+  bases: DavBases,
   repo: DavRepository,
   locks: DavLockGuard,
   dofs: DofsFs,
   deleteForMove: (destInner: string, req: Request) => Promise<Response | null>,
 ): Promise<Response> {
-  const destination = resolveDestination(request, base, innerPath);
+  const destination = resolveDestination(request, bases.pathBase, innerPath);
   if (!destination.ok) return destination.response;
   const { destInner } = destination;
   const srcLock = locks.assertLock(request, innerPath);
@@ -164,7 +169,7 @@ async function handleMove(
   }
   // MOVE preserves locks (RFC 4918 §9.9); COPY does not.
   repo.renameCascade(innerPath, destInner);
-  return destExists ? new Response(null, { status: 204 }) : createdResponse(hrefOf(base, destInner, srcStat.isDirectory));
+  return destExists ? new Response(null, { status: 204 }) : createdResponse(hrefOf(bases.hrefBase, destInner, srcStat.isDirectory));
 }
 
 export { handleCopy, handleMove };

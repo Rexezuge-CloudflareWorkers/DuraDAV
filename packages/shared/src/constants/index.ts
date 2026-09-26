@@ -8,4 +8,13 @@ export {
   isValidVolumeName,
 } from './naming';
 
+export {
+  DAV_HREF_PREFIX_MODES,
+  DEFAULT_DAV_HREF_PREFIX_MODE,
+  isDavHrefPrefixMode,
+  toDavHrefPrefixMode,
+  readDavHrefPrefixMode,
+} from './davHref';
+export type { DavHrefPrefixMode } from './davHref';
+
 export const DEMO_USER_EMAIL = 'demo@example.com';

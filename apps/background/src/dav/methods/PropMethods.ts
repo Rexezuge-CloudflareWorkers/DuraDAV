@@ -20,6 +20,7 @@ async function readXmlBody(request: Request): Promise<string | null> {
   return result.ok ? result.text : null;
 }
 import { hrefOf } from '../DavContext';
+import type { DavBases } from '../DavContext';
 import type { DavLockGuard } from '../DavLockGuard';
 import type { DavRepository } from '../DavRepository';
 
@@ -36,16 +37,16 @@ function logPropWriteFailure(innerPath: string, property: DeadProperty, error: u
   });
 }
 
-async function handlePropfind(request: Request, innerPath: string, base: string, repo: DavRepository): Promise<Response> {
+async function handlePropfind(request: Request, innerPath: string, bases: DavBases, repo: DavRepository): Promise<Response> {
   const xml = await readXmlBody(request);
   if (xml === null) return new Response('Payload Too Large', { status: 413 });
   const parsed = parsePropfindRequest(xml);
   if (!parsed) return new Response('Bad Request', { status: 400 });
-  const node = innerPath === '' ? repo.rootNode() : repo.nodeInfo(innerPath, base);
+  const node = innerPath === '' ? repo.rootNode() : repo.nodeInfo(innerPath, bases.hrefBase);
   if (innerPath !== '' && !node) return new Response('Not Found', { status: 404 });
   let page = `<?xml version="1.0" encoding="utf-8"?>\n<multistatus xmlns="DAV:">`;
   const props = parsed.mode === 'prop' ? parsed.properties : [];
-  page += generatePropfindResponse(node, parsed.mode, props, base);
+  page += generatePropfindResponse(node, parsed.mode, props, bases.hrefBase);
   if (node?.isCollection ?? true) {
     const depth = request.headers.get('Depth') ?? 'infinity';
     if (depth !== '0' && depth !== '1' && depth !== 'infinity') return new Response('Bad Request', { status: 400 });
@@ -54,15 +55,15 @@ async function handlePropfind(request: Request, innerPath: string, base: string,
       for (const name of repo.listChildren(innerPath)) {
         const childInner = repo.childInner(innerPath, name);
         seen.add(childInner);
-        const child = repo.nodeInfo(childInner, base);
-        if (child) page += generatePropfindResponse(child, parsed.mode, props, base);
+        const child = repo.nodeInfo(childInner, bases.hrefBase);
+        if (child) page += generatePropfindResponse(child, parsed.mode, props, bases.hrefBase);
       }
       if (depth === 'infinity') {
         for (const name of repo.listRecursive(innerPath)) {
           const childInner = repo.childInner(innerPath, name);
           if (seen.has(childInner)) continue;
-          const child = repo.nodeInfo(childInner, base);
-          if (child) page += generatePropfindResponse(child, parsed.mode, props, base);
+          const child = repo.nodeInfo(childInner, bases.hrefBase);
+          if (child) page += generatePropfindResponse(child, parsed.mode, props, bases.hrefBase);
         }
       }
     }
@@ -74,14 +75,14 @@ async function handlePropfind(request: Request, innerPath: string, base: string,
 async function handleProppatch(
   request: Request,
   innerPath: string,
-  base: string,
+  bases: DavBases,
   repo: DavRepository,
   locks: DavLockGuard,
   sql: DurableSqlStorage,
 ): Promise<Response> {
   const locked = locks.assertLock(request, innerPath);
   if (locked) return locked;
-  const node = innerPath === '' ? repo.rootNode() : repo.nodeInfo(innerPath, base);
+  const node = innerPath === '' ? repo.rootNode() : repo.nodeInfo(innerPath, bases.hrefBase);
   if (!node && innerPath !== '') return new Response('Not Found', { status: 404 });
   const requestXml = await readXmlBody(request);
   if (requestXml === null) return new Response('Payload Too Large', { status: 413 });
@@ -153,7 +154,7 @@ async function handleProppatch(
   for (const p of failedRemoves) append(p, 'HTTP/1.1 403 Forbidden');
   for (const p of erroredSets) append(p, dependencyStatus);
   for (const p of erroredRemoves) append(p, dependencyStatus);
-  let xml = `<?xml version="1.0" encoding="utf-8"?>\n<multistatus xmlns="DAV:">\n<response>\n<href>${escapeXml(hrefOf(base, innerPath, node?.isCollection ?? false))}</href>`;
+  let xml = `<?xml version="1.0" encoding="utf-8"?>\n<multistatus xmlns="DAV:">\n<response>\n<href>${escapeXml(hrefOf(bases.hrefBase, innerPath, node?.isCollection ?? false))}</href>`;
   for (const [status, props] of propstats) {
     xml += `\n<propstat>\n<prop>\n${props.join('\n')}\n</prop>\n<status>${status}</status>\n</propstat>`;
   }

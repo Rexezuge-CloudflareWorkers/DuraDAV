@@ -2,12 +2,18 @@
 import type { DofsFs } from '@durable-dav/dav-store';
 import { escapeXml } from '@durable-dav/webdav';
 import { fsPathOf, hrefOf } from '../DavContext';
+import type { DavBases } from '../DavContext';
 import { DavConditionalGuard } from '../DavConditionalGuard';
 import { parseRangeHeader } from '../RangeParser';
 import type { DavRepository } from '../DavRepository';
 
 // Collection HTML browser + file byte serving (Command: one handler per
 // WebDAV method family so `DavVolumeWorker` stays a thin Facade).
+//
+// `base` here is deliberately the *path* base, never the href base: these are
+// `<a href>`s a browser resolves against the request URL, which is not what
+// RFC 4918 §8.3 governs. A `root`-mode bucket whose links were anchored at `/`
+// would have its human-facing listing 404 on the first click.
 function renderCollectionHtml(
   base: string,
   innerPath: string,
@@ -25,7 +31,7 @@ function renderCollectionHtml(
 async function handleGet(
   request: Request,
   innerPath: string,
-  base: string,
+  bases: DavBases,
   headOnly: boolean,
   repo: DavRepository,
   dofs: DofsFs,
@@ -39,7 +45,7 @@ async function handleGet(
       const childInner = repo.childInner(innerPath, name);
       return { name, childInner, isDirectory: repo.statInner(childInner).isDirectory };
     });
-    return new Response(renderCollectionHtml(base, innerPath, children), {
+    return new Response(renderCollectionHtml(bases.pathBase, innerPath, children), {
       status: 200,
       headers: { 'Content-Type': 'text/html; charset=utf-8' },
     });

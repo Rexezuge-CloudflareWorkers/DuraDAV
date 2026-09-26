@@ -15,6 +15,7 @@ import {
   type LockDetails,
 } from '@durable-dav/webdav';
 import { hrefOf } from '../DavContext';
+import type { DavBases } from '../DavContext';
 import type { DavLockGuard } from '../DavLockGuard';
 import type { DavRepository } from '../DavRepository';
 
@@ -63,7 +64,7 @@ function readLocks(sql: DurableSqlStorage, innerPath: string): LockDetails[] {
   }
 }
 
-async function handleLock(request: Request, innerPath: string, base: string, deps: LockDeps): Promise<Response> {
+async function handleLock(request: Request, innerPath: string, bases: DavBases, deps: LockDeps): Promise<Response> {
   const { repo, locks, sql } = deps;
   const depthHeader = request.headers.get('Depth');
   if (depthHeader !== null && depthHeader !== '0' && depthHeader !== 'infinity') {
@@ -166,7 +167,11 @@ async function handleLock(request: Request, innerPath: string, base: string, dep
     depth,
     timeout,
     expiresAt,
-    root: hrefOf(base, activePath, deps.statIsDirectory(activePath)),
+    // Stored, so it survives a later PROPFIND — but `lockdiscovery` recomputes
+    // its href from the current base rather than reading this column, so a
+    // bucket that later switches href mode still advertises the right shape
+    // there. Only this LOCK response body can echo a pre-switch value.
+    root: hrefOf(bases.hrefBase, activePath, deps.statIsDirectory(activePath)),
   };
   try {
     if (existing) {

@@ -1,8 +1,32 @@
 import { stripSlashes } from '@durable-dav/webdav';
+import { readDavHrefPrefixMode } from '@durable-dav/shared/constants';
+import type { DavHrefPrefixMode } from '@durable-dav/shared/constants';
 
 // Pure path helpers shared by every WebDAV method handler (why: the DO
 // previously duplicated `fsPathOf`/`hrefOf`/base-stripping inline, which hid
 // traversal edge cases and made unit testing impossible).
+
+/**
+ * The two prefixes a volume request carries, which are not the same thing.
+ *
+ * `pathBase` is the volume's real public prefix (`/owner/volume`). It is
+ * addressing: request-URL resolution (`resolveInnerPath`) and `Destination`
+ * mapping (`stripBase`) both need it, and it is the same for every bucket.
+ *
+ * `hrefBase` is what `DAV:href` values are anchored to, and a bucket may opt
+ * out of carrying the base — see `resolveDavBases`. `''` means "anchor at the
+ * root", which the `hrefOf`/`getResourceHref` builders already implement.
+ *
+ * These were one `base` parameter and had to be split: a single string cannot
+ * both resolve the request URL and describe the href shape a `root`-mode
+ * bucket should advertise. Threading one object rather than two strings means
+ * every call site has to name both, so a new handler cannot silently pick the
+ * wrong one for addressing.
+ */
+interface DavBases {
+  pathBase: string;
+  hrefBase: string;
+}
 
 /**
  * Maximum segments in a volume-relative path. Bounds the ancestor walks in
@@ -19,6 +43,20 @@ function hrefOf(base: string, innerPath: string, isCollection: boolean): string 
   const prefix = base.endsWith('/') ? base.slice(0, -1) : base;
   if (innerPath === '') return `${prefix}/`;
   return `${prefix}/${innerPath.split('/').map(encodeURIComponent).join('/')}${isCollection ? '/' : ''}`;
+}
+
+/**
+ * Derive both bases from the front door's two headers.
+ *
+ * `X-Dav-Href-Prefix-Mode` is optional and defaults to `base`, so a request
+ * from an older front door — or a direct DO call — keeps the href shape every
+ * existing client already works with. An unrecognised mode takes the same
+ * default rather than failing the request: the value can only be wrong through
+ * version skew, and the conforming shape is the safe answer to that.
+ */
+function resolveDavBases(pathBase: string, hrefPrefixMode: string | null | undefined): DavBases {
+  const mode: DavHrefPrefixMode = readDavHrefPrefixMode(hrefPrefixMode);
+  return { pathBase, hrefBase: mode === 'root' ? '' : pathBase };
 }
 
 /**
@@ -96,4 +134,5 @@ function stripBase(full: string, base: string): string | null {
   return parts.length >= 2 && `${parts[0]}/${parts[1]}`.toLowerCase() === baseLower ? parts.slice(2).join('/') : null;
 }
 
-export { MAX_PATH_DEPTH, fsPathOf, hrefOf, isValidInnerPath, resolveInnerPath, stripBase };
+export { MAX_PATH_DEPTH, fsPathOf, hrefOf, isValidInnerPath, resolveInnerPath, stripBase, resolveDavBases };
+export type { DavBases };

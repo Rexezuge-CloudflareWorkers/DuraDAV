@@ -6,7 +6,7 @@ import { DAV_CLASS, SUPPORT_METHODS } from '@durable-dav/webdav';
 import { AppConfiguration } from '@durable-dav/backend-runtime/config';
 import { DavRepository } from './dav/DavRepository';
 import { DavLockGuard } from './dav/DavLockGuard';
-import { fsPathOf, isValidInnerPath, resolveInnerPath } from './dav/DavContext';
+import { fsPathOf, isValidInnerPath, resolveInnerPath, resolveDavBases } from './dav/DavContext';
 import { VolumeTransfer } from './dav/VolumeTransfer';
 import type { VolumeEntry } from './dav/VolumeTransfer';
 import { handleGet } from './dav/methods/ReadMethods';
@@ -106,8 +106,11 @@ class DavVolumeWorker extends DurableObject<Env> {
 
   private async dispatch(request: Request): Promise<Response> {
     const url = new URL(request.url);
-    const base = request.headers.get('X-Dav-Base') ?? '';
-    const innerPath = resolveInnerPath(request, url, base);
+    // `X-Dav-Base` addresses the request; `X-Dav-Href-Prefix-Mode` only says
+    // how hrefs should be anchored. See `DavBases`.
+    const pathBase = request.headers.get('X-Dav-Base') ?? '';
+    const bases = resolveDavBases(pathBase, request.headers.get('X-Dav-Href-Prefix-Mode'));
+    const innerPath = resolveInnerPath(request, url, pathBase);
     if (innerPath === null) return new Response('Bad Request', { status: 400 });
     if (!isValidInnerPath(innerPath)) return new Response('Bad Request', { status: 400 });
 
@@ -140,10 +143,10 @@ class DavVolumeWorker extends DurableObject<Env> {
         });
       }
       case 'HEAD': {
-        return handleGet(request, innerPath, base, true, repo, this.dofs);
+        return handleGet(request, innerPath, bases, true, repo, this.dofs);
       }
       case 'GET': {
-        return handleGet(request, innerPath, base, false, repo, this.dofs);
+        return handleGet(request, innerPath, bases, false, repo, this.dofs);
       }
       case 'PUT': {
         return handlePut(request, innerPath, repo, locks, this.dofs, this.config.getMaxFileBytes());
@@ -155,19 +158,19 @@ class DavVolumeWorker extends DurableObject<Env> {
         return handleMkcol(request, innerPath, repo, locks, this.dofs);
       }
       case 'PROPFIND': {
-        return handlePropfind(request, innerPath, base, repo);
+        return handlePropfind(request, innerPath, bases, repo);
       }
       case 'PROPPATCH': {
-        return handleProppatch(request, innerPath, base, repo, locks, sql);
+        return handleProppatch(request, innerPath, bases, repo, locks, sql);
       }
       case 'COPY': {
-        return handleCopy(request, innerPath, base, repo, locks, this.dofs, deleteDestination);
+        return handleCopy(request, innerPath, bases, repo, locks, this.dofs, deleteDestination);
       }
       case 'MOVE': {
-        return handleMove(request, innerPath, base, repo, locks, this.dofs, deleteDestination);
+        return handleMove(request, innerPath, bases, repo, locks, this.dofs, deleteDestination);
       }
       case 'LOCK': {
-        return handleLock(request, innerPath, base, {
+        return handleLock(request, innerPath, bases, {
           repo,
           locks,
           sql,

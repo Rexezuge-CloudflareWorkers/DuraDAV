@@ -14,8 +14,21 @@ export interface Volume {
   fullName: string;
   description?: string | null;
   isPrivate: boolean;
+  /**
+   * How this bucket's `DAV:href` values are anchored.
+   *
+   * `base` is the RFC 4918 §8.3 form (hrefs carry `/owner/volume`) and what
+   * every bucket gets unless its owner asks otherwise. `root` anchors them at
+   * `/` for clients that expect the volume root to be the server root. The
+   * bucket browser works with either — `davXml.parseMultistatus` tolerates a
+   * missing prefix and builds its own request URLs — so this only changes what
+   * third-party clients see.
+   */
+  hrefPrefixMode: DavHrefPrefixMode;
   href: string;
 }
+
+export type DavHrefPrefixMode = 'base' | 'root';
 
 export interface VolumeDetail extends Volume {
   description: string | null;
