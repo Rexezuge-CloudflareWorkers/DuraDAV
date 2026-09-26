@@ -1,51 +1,20 @@
 import { Tokens } from '@durable-dav/backend-services/composition';
-import { SUPPORT_METHODS, DAV_CLASS } from '@durable-dav/webdav';
+import { SUPPORT_METHODS, DAV_CLASS, stripSlashes } from '@durable-dav/webdav';
+import { readDavHrefPrefixMode } from '@durable-dav/shared/constants';
 import type { ApiApp, ApiContext } from '@/types/ApiContext';
 import { getVolumeStub } from '../doStubs';
 import { invalidateVolumeCaches, invalidatesReadCache } from './DavReadCache';
+import { resolveDestination } from './davDestination';
 import { VolumeScopedRoute } from './VolumeScopedRoute';
 import type { VolumeRequestContext } from './VolumeScopedRoute';
 
 type App = ApiApp;
-
-function stripSlashes(value: string): string {
-  let start = 0;
-  let end = value.length;
-  while (start < end && value[start] === '/') start += 1;
-  while (end > start && value[end - 1] === '/') end -= 1;
-  return value.slice(start, end);
-}
 
 function innerFromPath(pathname: string): string {
   // Browser prefix is /user/volumes/:owner/:volume/files[/inner...].
   // Split on '/' so owner/volume case or encoding never breaks extraction.
   const parts = stripSlashes(pathname).split('/');
   return parts.length <= 5 ? '' : parts.slice(5).join('/');
-}
-
-/**
- * Rewrite a browser-shaped `Destination` onto the DAV base.
- *
- * Returns `null` for a cross-origin destination. RFC 4918 §10.3 requires the
- * server to reject one it cannot map with `502 Bad Gateway`; forwarding the raw
- * header instead relied entirely on a same-origin check inside the DO, one
- * package away.
- */
-function rewriteDestination(destinationHeader: string | null, requestUrl: string, davBase: string): string | null {
-  if (!destinationHeader) return null;
-  try {
-    const destUrl = new URL(destinationHeader, requestUrl);
-    if (destUrl.origin !== new URL(requestUrl).origin) return null;
-    const parts = stripSlashes(destUrl.pathname).split('/');
-    // Browser-style destination: /user/volumes/<owner>/<vol>/files/<inner>
-    if (parts.length >= 5 && parts[0] === 'user' && parts[1] === 'volumes' && parts[4] === 'files') {
-      const destInner = parts.slice(5).join('/');
-      return `${destUrl.origin}${davBase}${destInner === '' ? '/' : `/${destInner}`}`;
-    }
-    return destUrl.href;
-  } catch {
-    return null;
-  }
 }
 
 /**
@@ -76,14 +45,19 @@ class BrowserVolumeRoute extends VolumeScopedRoute {
 
     const stub = getVolumeStub(c.env, row.owner, row.name);
     const davBase = `/${row.owner}/${row.name}`;
+    // The bucket's own setting, read from the row the ownership guard already
+    // loaded. This plane honours it too, so one bucket answers one href shape
+    // regardless of which plane a client used to reach it.
+    const hrefPrefixMode = readDavHrefPrefixMode(row.href_prefix_mode);
     const url = new URL(c.req.url);
     const inner = innerFromPath(url.pathname);
     const hasBody = !['GET', 'HEAD', 'OPTIONS'].includes(method);
-    const destination = rewriteDestination(c.req.raw.headers.get('Destination'), c.req.url, davBase);
-    if (destination === null && c.req.raw.headers.has('Destination')) {
-      // §10.3: a destination on another server cannot be satisfied.
-      return c.json({ Exception: { Type: 'BadGateway', Message: 'Cross-origin Destination' } }, 502);
-    }
+    const destination = resolveDestination(c.req.raw.headers.get('Destination'), c.req.url, davBase, hrefPrefixMode);
+    if (c.req.raw.headers.has('Destination') && !destination.ok) {
+        // §10.3: a destination on another server cannot be satisfied. Any other
+        // unmappable destination is a plain 400, as on the DAV plane.
+        return destination.reason === 'cross-origin' ? c.json({ Exception: { Type: 'BadGateway', Message: 'Cross-origin Destination' } }, 502) : c.json({ Exception: { Type: 'BadRequest', Message: 'Invalid Destination' } }, 400);
+      }
     // Forward to the DAV-base URL (not the browser URL): the DO falls back to
     // pathname parsing when X-Dav-Path is empty (root), and the browser prefix
     // would resolve to a nonexistent inner path there.
@@ -93,8 +67,9 @@ class BrowserVolumeRoute extends VolumeScopedRoute {
         const h = new Headers(c.req.raw.headers);
         h.set('X-Dav-Base', davBase);
         h.set('X-Dav-Path', inner);
+        h.set('X-Dav-Href-Prefix-Mode', hrefPrefixMode);
         h.set('X-Dav-User', email);
-        if (destination) h.set('Destination', destination);
+        if (destination.ok) h.set('Destination', destination.destination);
         // Never forward ambient Basic credentials into the DO on this plane;
         // session identity is authoritative here.
         h.delete('Authorization');
@@ -125,4 +100,4 @@ function registerVolumeBrowserRoutes(app: App): void {
   app.on(methods, '/user/volumes/:owner/:volume/files/*', (c) => handler.handle(c));
 }
 
-export { registerVolumeBrowserRoutes, innerFromPath, rewriteDestination };
+export { registerVolumeBrowserRoutes, innerFromPath };

@@ -1,6 +1,8 @@
 import type { Context } from 'hono';
 import { Tokens } from '@durable-dav/backend-services/composition';
 import { DavCredentialUtil } from '@durable-dav/shared/utils';
+import type { DavHrefPrefixMode } from '@durable-dav/shared/constants';
+import { readDavHrefPrefixMode } from '@durable-dav/shared/constants';
 import { DatabaseError } from '@durable-dav/backend-errors';
 import { BaseRoute } from '../endpoints/IBaseRoute';
 
@@ -32,6 +34,14 @@ export interface DavAuthResult {
   Canonical volume name.
   */
   volume: string;
+  /**
+  How this bucket's `DAV:href` values are anchored.
+
+  Read from the volume row the authorization already loaded, so honouring the
+  per-bucket setting costs no extra D1 query on the DAV hot path. The front
+  door turns it into the `X-Dav-Href-Prefix-Mode` header; the DO never reads D1.
+  */
+  hrefPrefixMode: DavHrefPrefixMode;
 }
 
 /**
@@ -60,6 +70,18 @@ function unauthorizedDav(): Response {
     status: 401,
     headers: { 'WWW-Authenticate': 'Basic realm="Durable-DAV"' },
   });
+}
+
+/**
+ * The row's href mode, coerced in one place.
+ *
+ * `href_prefix_mode` is TEXT and added by migration 0003, so a row written
+ * before it has no such field at all. `readDavHrefPrefixMode` maps both that and
+ * any value the `CHECK` should have prevented to `base`, so an odd row keeps
+ * serving the RFC-conforming shape instead of failing every DAV request.
+ */
+function hrefModeOf(volume: { href_prefix_mode: string }): DavHrefPrefixMode {
+  return readDavHrefPrefixMode(volume.href_prefix_mode);
 }
 
 async function davAuthForVolume(
@@ -127,14 +149,14 @@ async function davAuthForVolumeInner(
     // `last_used_at` is genuinely best-effort telemetry; a failure here must
     // not fail an otherwise-valid request.
     await credentialDAO.updateLastUsed(credential.credentialId).catch(() => undefined);
-    return { userEmail: volume.owner_email, owner: volume.owner, volume: volume.name };
+    return { userEmail: volume.owner_email, owner: volume.owner, volume: volume.name, hrefPrefixMode: hrefModeOf(volume) };
   }
 
   // No credential: public buckets allow anonymous reads only; all writes
   // and all private access require a bucket credential.
   if (!needWrite && !isPrivate) {
     const role = await scope.get(Tokens.DavPermissionService).getRole(null, volume);
-    return role ? { userEmail: null, owner: volume.owner, volume: volume.name } : unauthorizedDav();
+    return role ? { userEmail: null, owner: volume.owner, volume: volume.name, hrefPrefixMode: hrefModeOf(volume) } : unauthorizedDav();
   }
   return unauthorizedDav();
 }

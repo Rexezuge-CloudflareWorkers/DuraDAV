@@ -7,6 +7,7 @@ import { getVolumeStub } from '../doStubs';
 import { DAV_CLASS, SUPPORT_METHODS, applyCors } from '@durable-dav/webdav';
 import { contentTtls, invalidateVolumeCaches, invalidatesReadCache } from './DavReadCache';
 import { davHeaders, serveGet, servePropfind } from './DavReadServing';
+import { resolveDestination } from './davDestination';
 
 type App = ApiApp;
 type DavContext = ApiContext;
@@ -92,9 +93,24 @@ async function handleDav(c: DavContext, owner: string, volume: string, inner: st
     return cors(c, await servePropfind({ c, stub, auth, base, inner, cache, ttls }));
   }
   const hasBody = !['GET', 'HEAD', 'OPTIONS'].includes(method);
+  const headers = davHeaders(c, auth, base, inner);
+  // `Destination` is canonicalised to the `/owner/volume` form before the DO
+  // sees it, so the DO only ever has to understand one shape (see
+  // `davDestination`). A `root`-mode bucket has to be able to accept the
+  // root-relative hrefs it advertised, and the DO cannot tell those apart from
+  // a traversal escape — so the front door resolves it, and rejects what it
+  // cannot map rather than spending a DO round trip to be told 400.
+  if (method === 'COPY' || method === 'MOVE') {
+    const resolved = resolveDestination(c.req.raw.headers.get('Destination'), c.req.url, base, auth.hrefPrefixMode);
+    // Plain `400 Bad Request`, matching what the DO has always answered for an
+    // absent, cross-origin, or unmappable `Destination`. The browser plane's
+    // `502` for a cross-origin destination is its own contract and unchanged.
+    if (!resolved.ok) return cors(c, new Response('Bad Request', { status: 400 }));
+    headers.set('Destination', resolved.destination);
+  }
   const forward = new Request(c.req.url, {
     method,
-    headers: davHeaders(c, auth, base, inner),
+    headers,
     body: hasBody ? c.req.raw.body : undefined,
     ...(hasBody && { duplex: 'half' }),
   });

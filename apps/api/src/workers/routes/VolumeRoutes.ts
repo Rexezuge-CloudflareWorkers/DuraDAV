@@ -1,4 +1,7 @@
 import { Tokens } from '@durable-dav/backend-services/composition';
+import type { VolumePatch } from '@durable-dav/backend-services/dav';
+import { readDavHrefPrefixMode } from '@durable-dav/shared/constants';
+import type { DavHrefPrefixMode } from '@durable-dav/shared/constants';
 import { BaseRoute } from '@/endpoints/IBaseRoute';
 import type { ApiApp, ApiContext } from '@/types/ApiContext';
 import { getVolumeStub } from '../doStubs';
@@ -14,16 +17,22 @@ type VolumeJson = {
   fullName: string;
   description: string | null;
   isPrivate: boolean;
+  /**
+   * How this bucket's `DAV:href` values are anchored. Always present, so the
+   * dashboard never has to distinguish "not reported" from "conforming".
+   */
+  hrefPrefixMode: DavHrefPrefixMode;
   href: string;
 };
 
-function toVolumeJson(r: { owner: string; name: string; description: string | null; is_private: number }): VolumeJson {
+function toVolumeJson(r: { owner: string; name: string; description: string | null; is_private: number; href_prefix_mode: string }): VolumeJson {
   return {
     owner: r.owner,
     name: r.name,
     fullName: `${r.owner}/${r.name}`,
     description: r.description,
     isPrivate: Number(r.is_private) === 1,
+    hrefPrefixMode: readDavHrefPrefixMode(r.href_prefix_mode),
     href: `/${r.owner}/${r.name}/`,
   };
 }
@@ -79,14 +88,27 @@ class VolumeDetail extends VolumeScopedRoute {
 
 class UpdateVolume extends VolumeScopedRoute {
   protected async run(c: ApiContext, { scope, email, row }: VolumeRequestContext): Promise<Response> {
-    const { malformed, oversized, body } = await BaseRoute.readJson<{ description?: string | null; isPrivate?: boolean }>(c);
+    const { malformed, oversized, body } = await BaseRoute.readJson<VolumePatch>(c);
     if (oversized) return c.json({ Exception: { Type: 'PayloadTooLarge', Message: 'Payload too large' } }, 413);
     if (malformed) return c.json({ Exception: { Type: 'BadRequest', Message: 'Invalid JSON body' } }, 400);
-    const patch: { description?: string | null; isPrivate?: boolean } = {};
+    const patch: VolumePatch = {};
     if ('description' in body) patch.description = body.description ?? null;
     if ('isPrivate' in body) patch.isPrivate = body.isPrivate;
+    // Passed through unvalidated so `VolumeService.validateVolumePatch` owns the
+    // enum check and answers 400 — the route has no second copy of the rule to
+    // drift from.
+    if ('hrefPrefixMode' in body) patch.hrefPrefixMode = body.hrefPrefixMode;
     const updated = await scope.get(Tokens.VolumeService).updateVolume(row.owner, row.name, email, patch);
-    await invalidateVolumeListCache(scope.get(Tokens.KvCache), email);
+    const cache = scope.get(Tokens.KvCache);
+    await invalidateVolumeListCache(cache, email);
+    // Cached PROPFIND bodies are keyed on volume+path+depth+request-body, with
+    // no term for the href mode — so a mode flip would keep serving 207s in the
+    // old shape for the rest of their TTL. Purging on change is what makes the
+    // setting take effect on the next request rather than up to two minutes
+    // later, which is the whole point of the control.
+    if (patch.hrefPrefixMode !== undefined && patch.hrefPrefixMode !== readDavHrefPrefixMode(row.href_prefix_mode)) {
+      await invalidateVolumeCaches(cache, row.owner, row.name);
+    }
     return c.json(toVolumeJson(updated));
   }
 }
@@ -132,6 +154,7 @@ async function handleCreateVolume(c: ApiContext): Promise<Response> {
     name?: string;
     isPrivate?: boolean;
     description?: string | null;
+    hrefPrefixMode?: DavHrefPrefixMode;
   }>(c);
   if (oversized) return c.json({ Exception: { Type: 'PayloadTooLarge', Message: 'Payload too large' } }, 413);
   if (malformed) return c.json({ Exception: { Type: 'BadRequest', Message: 'Invalid JSON body' } }, 400);
@@ -145,6 +168,7 @@ async function handleCreateVolume(c: ApiContext): Promise<Response> {
     name: body.name,
     description: body.description ?? null,
     isPrivate: body.isPrivate ?? true,
+    hrefPrefixMode: body.hrefPrefixMode,
     creatorEmail: email,
   });
   await invalidateVolumeListCache(scope.get(Tokens.KvCache), email);

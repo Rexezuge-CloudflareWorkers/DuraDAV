@@ -36,5 +36,5 @@ litmus -k http://localhost:8787/test/photos/ basic copymove props locks
 - `packages/dav-store/` — `dofs` factory + DO SQLite schema (`dav_nodes/props/locks`).
 - `apps/background/src/DavVolumeWorker.ts` — per-volume DO (all WebDAV methods).
 - `apps/api/` — `DurableDavWorker` front (auth, volume CRUD, DO forward, CORS, browser HTML).
-- `migrations/0001_init.sql` baseline + `0002_bucket_credentials.sql` (`dav_credentials`, private-by-default; bucket credentials cascade on volume delete).
+- `migrations/0001_init.sql` baseline + `0002_bucket_credentials.sql` (`dav_credentials`, private-by-default; bucket credentials cascade on volume delete) + `0003_href_prefix_mode.sql` (per-bucket `DAV:href` anchoring).
 - `test/dav-webdav.test.ts` + `test/dav-config.test.ts` + `test/dav-do-helpers.test.ts` + `test/integration/api/DavLifecycle.int.test.ts` — unit + DO integration.

@@ -3,9 +3,11 @@ import type { DavVolumeRow } from '@durable-dav/backend-data/dao';
 import type { D1Queryable } from '@durable-dav/backend-data/utils';
 import { BadRequestError, ForbiddenError, NotFoundError } from '@durable-dav/backend-errors';
 import { isValidUsername, isValidVolumeName } from '@durable-dav/shared/constants';
+import type { DavHrefPrefixMode } from '@durable-dav/shared/constants';
 import { TimestampUtil, UUIDUtil } from '@durable-dav/shared/utils';
 import { AppConfiguration } from '@durable-dav/backend-runtime/config';
 import { checkVolumeQuota, validateVolumePatch } from './VolumeCreatePolicy';
+import type { VolumePatch } from './VolumeCreatePolicy';
 
 interface VolumeServiceEnv {
   DB: D1Queryable;
@@ -102,8 +104,12 @@ class VolumeService {
     name: string;
     description?: string | null;
     isPrivate?: boolean;
+    hrefPrefixMode?: DavHrefPrefixMode;
     creatorEmail: string;
   }): Promise<DavVolumeRow> {
+    // Same validation as the PATCH path, so a bad mode is a 400 on create
+    // rather than a CHECK-constraint 500 from the INSERT.
+    validateVolumePatch({ hrefPrefixMode: input.hrefPrefixMode });
     const owner = VolumeService.normalizeOwner(input.owner);
     VolumeService.assertValidOwner(owner);
     const name = VolumeService.normalizeName(input.name);
@@ -131,6 +137,7 @@ class VolumeService {
       name,
       description: input.description ?? null,
       isPrivate: input.isPrivate ?? true,
+      hrefPrefixMode: input.hrefPrefixMode,
       now,
     });
     const created = await dao.getById(id);
@@ -142,19 +149,24 @@ class VolumeService {
     owner: string,
     name: string,
     callerEmail: string,
-    patch: { description?: string | null; isPrivate?: boolean },
+    patch: VolumePatch,
   ): Promise<DavVolumeRow> {
     validateVolumePatch(patch);
     const volume = await this.requireVolume(owner, name);
     if (volume.owner_email.toLowerCase() !== callerEmail.toLowerCase()) {
       throw new ForbiddenError('Only the bucket owner can update this bucket');
     }
-    if (patch.description === undefined && patch.isPrivate === undefined) {
+    if (patch.description === undefined && patch.isPrivate === undefined && patch.hrefPrefixMode === undefined) {
       throw new BadRequestError('Nothing to update');
     }
     const now = TimestampUtil.getCurrentUnixTimestampInSeconds();
     const dao = await this.deps.volumeDAO();
-    await dao.update(volume.id, { description: patch.description, isPrivate: patch.isPrivate, now });
+    await dao.update(volume.id, {
+      description: patch.description,
+      isPrivate: patch.isPrivate,
+      hrefPrefixMode: patch.hrefPrefixMode,
+      now,
+    });
     const updated = await dao.getById(volume.id);
     if (!updated) throw new NotFoundError('Volume not found after update');
     return updated;

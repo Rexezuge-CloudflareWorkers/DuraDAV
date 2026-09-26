@@ -9,6 +9,7 @@ import { Label, Textarea } from '../ui/Input';
 import { RefreshButton } from '../shared/RefreshButton';
 import { TypeToConfirmModal } from '../modals/TypeToConfirmModal';
 import { VolumeCredentialsCard } from './VolumeCredentialsCard';
+import { HrefPrefixModeCard } from './HrefPrefixModeCard';
 
 export function VolumeSettingsTab({
   owner,
@@ -137,6 +138,10 @@ export function VolumeSettingsTab({
           </div>
         </form>
       </Card>
+
+      {detail && (
+        <HrefPrefixModeCard owner={owner} volume={volume} detail={detail} showNotice={showNotice} onUpdated={onUpdated} />
+      )}
 
       <VolumeCredentialsCard owner={owner} volume={volume} showNotice={showNotice} />
 

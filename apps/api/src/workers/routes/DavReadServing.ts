@@ -181,10 +181,22 @@ async function servePropfind(args: Omit<ServeReadArgs, 'headOnly'>): Promise<Res
   return respondFromBytes('propfind', 207, text, etag, {}, c.req.raw, false);
 }
 
+/**
+ * Header set the DO receives.
+ *
+ * `X-Dav-Base` (the real `/owner/volume` prefix) and `X-Dav-Href-Prefix-Mode`
+ * (how hrefs should be anchored) are separate headers on purpose: the first
+ * drives request addressing, the second only presentation. Conflating them
+ * would make a `root`-mode bucket unable to resolve its own request URL.
+ */
 function davHeaders(c: DavContext, auth: DavAuthResult, base: string, inner: string): Headers {
   const h = new Headers(c.req.raw.headers);
   h.set('X-Dav-Base', base);
   h.set('X-Dav-Path', inner);
+  // Always overwrite, like `X-Dav-User` below: a client-supplied
+  // `X-Dav-Href-Prefix-Mode: root` would otherwise reach the DO untouched and
+  // silently change the addressing shape of a bucket whose owner chose `base`.
+  h.set('X-Dav-Href-Prefix-Mode', auth.hrefPrefixMode);
   // Always overwrite. Setting it only when authenticated let a client-supplied
   // `X-Dav-User: admin@…` through untouched on an anonymous read of a public
   // volume. Nothing consumes it today, but it is a header-injection primitive
