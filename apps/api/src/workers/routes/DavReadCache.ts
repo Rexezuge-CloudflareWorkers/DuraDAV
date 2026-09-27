@@ -7,8 +7,10 @@ import { normalizeVolumeKey } from '@durable-dav/webdav';
 // lowercase volume key so `Foo/Bar` and `foo/bar` share one entry, matching
 // `DAV_VOLUME.getByName` sharding. PROPFIND snapshots live 120s (`davProp`
 // domain) and are invalidated on write; small file bodies live 300s
-// (`davFile` domain) keyed by volume+path; volume list/detail snapshots live
-// 60s (`davMeta` domain) keyed by owner email / volume key.
+// (`davFile` domain) keyed by volume+path; the per-owner volume *list*
+// snapshot lives 60s (`davMeta` domain) keyed by owner email. There is no
+// per-volume detail snapshot — `VolumeDetail` reads the row its ownership
+// guard already loaded.
 
 // Per-kind TTLs. `DAV_CACHE_TTL_SECONDS` scales the two content caches
 // together; the metadata snapshot is deliberately independent because it backs
@@ -218,11 +220,16 @@ async function invalidateVolumeCaches(cache: KvCache, owner: string, volume: str
   } catch {
     // Best-effort invalidation.
   }
-  try {
-    await cache.del('davMeta', ['volume', key]);
-  } catch {
-    // Best-effort invalidation.
-  }
+  // No `davMeta` sweep: the per-volume *detail* snapshot this used to drop is
+  // gone — `VolumeDetail` serves straight from the row its ownership guard
+  // already loaded, because the guard had to read D1 anyway and so the cache
+  // could never skip the query it existed for (see `VolumeRoutes`). The delete
+  // outlived the write and matched nothing, but the free plan meters a delete
+  // against a key that does not exist exactly like one that does, so every
+  // content-mutating DAV request was spending a unit of the 1,000/day budget on
+  // a guaranteed miss. `davMeta` now holds only the per-owner volume *list*
+  // (`davMeta:v1:volumes:<email>`), which is keyed on the owner rather than the
+  // volume and is invalidated by `invalidateVolumeListCache` instead.
 }
 
 async function invalidateVolumeListCache(cache: KvCache, ownerEmail: string): Promise<void> {
