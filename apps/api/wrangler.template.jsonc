@@ -75,6 +75,23 @@
     "MAX_CREDENTIAL_EXPIRY_DAYS": "365",
     "MAX_FILE_BYTES": "52428800",
     "DO_DEVICE_BYTES": "5368709120",
-    "DAV_CACHE_TTL_SECONDS": "300",
+    // Scales the `davProp` (PROPFIND) and `davFile` (small GET body) TTLs
+    // together; see `contentTtls` in DavReadCache. This is garbage collection,
+    // not a correctness mechanism — every content-mutating DAV method still
+    // purges on write, so a long TTL cannot serve stale bytes on its own.
+    //
+    // It was 300s, which sat *below* the poll interval of most WebDAV clients
+    // (Finder/Cyberduck/rsync-style syncs run every few minutes), so they missed
+    // the entry every single time and rewrote it on every request. Since the
+    // free plan meters 1,000 writes/day against 100,000 reads/day, a
+    // read-through cache needs a far higher hit ratio than that to pay for
+    // itself. 24h turns a recurring traversal into cache hits. `davMeta` is
+    // unaffected: the dashboard list has its own fixed 60s TTL.
+    //
+    // Ceiling to watch: the free plan also caps the namespace at 1GB, and
+    // `davFile` stores up to ~933KB per entry (700KB raw, base64), so a
+    // large enough file set can fill the namespace. `KvCache.putText` treats
+    // an over-quota write as a soft miss, so it degrades rather than erroring.
+    "DAV_CACHE_TTL_SECONDS": "86400",
   },
 }

@@ -32,7 +32,7 @@ const KV_DOMAINS: Record<KvDomainName, KvDomainDef> = {
   davMeta: {
     ttlSeconds: 60,
     maxValueBytes: 65_536,
-    description: 'Volume list/detail snapshots per owner email; invalidated on volume mutation.',
+    description: 'Volume list snapshots per owner email; invalidated on volume mutation. Keyed on the owner, not the volume.',
   },
 };
 
