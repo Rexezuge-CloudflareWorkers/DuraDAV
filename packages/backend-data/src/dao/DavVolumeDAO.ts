@@ -5,7 +5,18 @@ import { DEFAULT_DAV_HREF_PREFIX_MODE } from '@durable-dav/shared/constants';
 
 export interface DavVolumeRow {
   id: string;
+  /**
+   * The owner's *frozen anchor* address. Written once at create time and never
+   * updated — it is the `users(email)` foreign key target, so rewriting it
+   * would cascade this row away. Ownership decisions read `owner_user_id`.
+   */
   owner_email: string;
+  /**
+   * Stable account key of the owner. Added by migration 0004, so it is absent
+   * on a database that has not been migrated; ownership falls back to
+   * `owner_email` until it is backfilled.
+   */
+  owner_user_id?: string | null;
   owner: string;
   name: string;
   description: string | null;
@@ -31,6 +42,11 @@ class DavVolumeDAO extends BaseDAO {
   public async create(input: {
     id: string;
     ownerEmail: string;
+    /**
+     * Stable account key of the owner. Required for 0004+ databases; the
+     * INSERT names the column, so it must be applied before this code ships.
+     */
+    ownerUserId: string;
     owner: string;
     name: string;
     description: string | null;
@@ -48,11 +64,12 @@ class DavVolumeDAO extends BaseDAO {
       () =>
         this.database
           .prepare(
-            'INSERT INTO dav_volumes (id, owner_email, owner, name, description, is_private, href_prefix_mode, created_at, updated_at, owner_ci, name_ci) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+            'INSERT INTO dav_volumes (id, owner_email, owner_user_id, owner, name, description, is_private, href_prefix_mode, created_at, updated_at, owner_ci, name_ci) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
           )
           .bind(
             input.id,
             input.ownerEmail,
+            input.ownerUserId,
             input.owner,
             input.name,
             input.description,
@@ -110,6 +127,32 @@ class DavVolumeDAO extends BaseDAO {
     );
   }
 
+  /**
+   * Volumes owned by an account, resolved by stable key (0004+).
+   *
+   * The identity read. `listByOwnerEmail` survives only as the pre-0004
+   * fallback, because an account that has changed its address is no longer
+   * findable by its old one.
+   */
+  public async listByOwnerUserId(ownerUserId: string, limit = 1000): Promise<DavVolumeRow[]> {
+    const result = await this.database
+      .prepare('SELECT * FROM dav_volumes WHERE owner_user_id = ? ORDER BY updated_at DESC LIMIT ?')
+      .bind(ownerUserId, limit)
+      .all<DavVolumeRow>();
+    return result.results ?? [];
+  }
+
+  public async countByOwnerUserId(ownerUserId: string): Promise<number> {
+    const row = await this.database
+      .prepare('SELECT COUNT(*) AS cnt FROM dav_volumes WHERE owner_user_id = ?')
+      .bind(ownerUserId)
+      .first<{ cnt: number }>();
+    return row?.cnt ?? 0;
+  }
+
+  /**
+  @deprecated Pre-0004 fallback; prefer `listByOwnerUserId`.
+  */
   public async listByOwnerEmail(ownerEmail: string, limit = 1000): Promise<DavVolumeRow[]> {
     const result = await this.database
       // `owner_email` is stored lowercased (`VolumeService.createVolume`), so
@@ -132,6 +175,9 @@ class DavVolumeDAO extends BaseDAO {
     );
   }
 
+  /**
+  @deprecated Pre-0004 fallback; prefer `countByOwnerUserId`.
+  */
   public async countByOwnerEmail(ownerEmail: string): Promise<number> {
     const row = await this.database
       .prepare('SELECT COUNT(*) AS cnt FROM dav_volumes WHERE owner_email = ?')

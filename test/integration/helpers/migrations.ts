@@ -12,6 +12,29 @@
  */
 
 declare const __INTEGRATION_MIGRATION_SQL__: string;
+declare const __INTEGRATION_MIGRATION_FILES__: ReadonlyArray<{ name: string; sql: string }>;
+
+export interface MigrationFile {
+  name: string;
+  sql: string;
+}
+
+/**
+Migration files in apply order.
+*/
+function migrationFiles(): MigrationFile[] {
+  const files = typeof __INTEGRATION_MIGRATION_FILES__ === 'undefined' ? null : __INTEGRATION_MIGRATION_FILES__;
+  if (files && files.length > 0) return [...files];
+  // Fallback for harnesses that only inject the flattened string.
+  return [{ name: 'all.sql', sql: __INTEGRATION_MIGRATION_SQL__ }];
+}
+
+/**
+Names of the embedded migration files, in apply order.
+*/
+export function migrationFileNames(): string[] {
+  return migrationFiles().map((f) => f.name);
+}
 
 function splitSql(sql: string): string[] {
   const statements: string[] = [];
@@ -133,17 +156,72 @@ function splitSql(sql: string): string[] {
   return statements;
 }
 
-export async function applyMigrations(db: D1Database): Promise<void> {
-  const statements = splitSql(__INTEGRATION_MIGRATION_SQL__);
-  for (const stmt of statements) {
-    if (stmt.length === 0) continue;
+function executableStatements(sql: string): string[] {
+  return splitSql(sql).filter((stmt) => {
+    if (stmt.length === 0) return false;
     // Skip pure-comment statements (no executable SQL).
     const withoutComments = stmt
       .replaceAll(/--[^\n]*/g, '')
       .replaceAll(/\/\*[\s\S]*?\*\//g, '')
       .trim();
-    if (withoutComments.length === 0) continue;
-    await db.prepare(stmt).run();
+    return withoutComments.length > 0;
+  });
+}
+
+/**
+Strip leading `--` / block comments, which the splitter folds into the statement.
+*/
+function stripLeadingComments(stmt: string): string {
+  let out = stmt;
+  for (;;) {
+    const next = out.replace(/^\s*(?:--[^\n]*\n|\/\*[\s\S]*?\*\/)\s*/, '');
+    if (next === out) return out.trim();
+    out = next;
+  }
+}
+
+/**
+ * Apply one migration file as a single batch.
+ *
+ * Per file rather than one batch for everything, so a test can stop between
+ * files: the identity-upgrade test needs to seed the *pre-0004* shape and then
+ * apply 0004 to it. Batching across files would make seeding impossible.
+ */
+async function applyMigrationFile(db: D1Database, file: MigrationFile): Promise<void> {
+  const statements = executableStatements(file.sql);
+  if (statements.length === 0) return;
+  try {
+    await db.batch(statements.map((sql) => db.prepare(sql)));
+  } catch (error) {
+    // A batch reports only the file's single failure, so name the statement.
+    throw new Error(
+      `${file.name}: batch of ${statements.length} statements failed: ${
+        stripLeadingComments(statements.at(-1) ?? '').slice(0, 200)
+      }\n${error instanceof Error ? error.message : String(error)}`,
+      { cause: error },
+    );
+  }
+}
+
+/**
+ * Apply a range of migrations, defaulting to every file.
+ *
+ * `from`/`to` are file names (`0003_href_prefix_mode.sql`).
+ */
+export async function applyMigrations(db: D1Database, range?: { from?: string; to?: string }): Promise<void> {
+  const files = migrationFiles();
+  const indexOf = (name: string | undefined, fallback: number): number => {
+    if (!name) return fallback;
+    const found = files.findIndex((f) => f.name === name);
+    if (found === -1) {
+      throw new Error(`Unknown migration file: ${name}. Available: ${files.map((f) => f.name).join(', ')}`);
+    }
+    return found;
+  };
+  const start = indexOf(range?.from, 0);
+  const end = indexOf(range?.to, files.length - 1);
+  for (const file of files.slice(start, end + 1)) {
+    await applyMigrationFile(db, file);
   }
 }
 

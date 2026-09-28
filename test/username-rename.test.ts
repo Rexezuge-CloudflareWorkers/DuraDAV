@@ -2,11 +2,36 @@ import { describe, expect, it } from 'vitest';
 import { DavVolumeDAO } from '@durable-dav/backend-data/dao';
 import { UserService } from '@durable-dav/backend-services/user';
 
+type UserRowFixture = {
+  id: string;
+  email: string;
+  current_email: string;
+  created_at: number;
+  username: string | null;
+  updated_at: number | null;
+};
+
+type NamespaceRowFixture = {
+  username_ci: string;
+  kind: string;
+  user_email: string | null;
+  user_id: string | null;
+  created_at: number;
+};
+
+type EmailRowFixture = { email: string; user_id: string; is_verified: number; created_at: number };
+
+/**
+ * A fake D1 holding the post-0004 shape: `users` carries the stable `id` and the
+ * mutable `current_email` alongside the frozen anchor `email`, and `user_emails`
+ * is the address registry that resolution goes through.
+ */
 function fakeDb() {
   return {
-    users: [] as Array<{ email: string; created_at: number; username: string | null; updated_at: number | null }>,
-    namespaces: [] as Array<{ username_ci: string; kind: string; user_email: string | null; created_at: number }>,
-    volumes: [] as Array<{ id: string; owner_email: string; owner: string; name: string; owner_ci: string }>,
+    users: [] as UserRowFixture[],
+    namespaces: [] as NamespaceRowFixture[],
+    userEmails: [] as EmailRowFixture[],
+    volumes: [] as Array<{ id: string; owner_email: string; owner_user_id: string | null; owner: string; name: string; owner_ci: string }>,
   };
 }
 
@@ -17,13 +42,22 @@ function makeD1(db: Db) {
     prepare: (query: string) => ({
       bind: (...bindings: unknown[]) => ({
         first: async () => {
-          // The DAOs now lowercase the *parameter* instead of wrapping the
-          // column in `lower()`, so the index on each column stays usable.
+          // The DAOs lowercase the *parameter* instead of wrapping the column in
+          // `lower()`, so the index on each column stays usable.
+          if (query.includes('FROM users WHERE id = ?')) {
+            return (db.users.find((u) => u.id === String(bindings[0])) ?? null) as never;
+          }
+          if (query.includes('FROM users WHERE current_email = ?')) {
+            return (db.users.find((u) => u.current_email === String(bindings[0]).toLowerCase()) ?? null) as never;
+          }
           if (query.includes('FROM users WHERE email = ?')) {
             return (db.users.find((u) => u.email === String(bindings[0]).toLowerCase()) ?? null) as never;
           }
           if (query.includes('FROM users WHERE username = ?')) {
             return (db.users.find((u) => (u.username ?? '') === String(bindings[0]).toLowerCase()) ?? null) as never;
+          }
+          if (query.includes('FROM user_emails WHERE email = ?')) {
+            return (db.userEmails.find((e) => e.email === String(bindings[0]).toLowerCase()) ?? null) as never;
           }
           return query.includes('FROM namespaces WHERE username_ci')
             ? ((db.namespaces.find((n) => n.username_ci === String(bindings[0])) ?? null) as never)
@@ -32,23 +66,33 @@ function makeD1(db: Db) {
         all: async () => ({ results: [] }) as never,
         run: async () => {
           if (query.startsWith('INSERT INTO namespaces ')) {
-            const [usernameCi, kind, userEmail, createdAt] = bindings as [string, string, string | null, number];
-            if (db.namespaces.some((n) => n.username_ci === usernameCi))
-              throw new Error('UNIQUE constraint failed: namespaces.username_ci');
-            db.namespaces.push({ username_ci: usernameCi, kind, user_email: userEmail, created_at: createdAt });
+            const [usernameCi, kind, userEmail, userId, createdAt] = bindings as [string, string, string | null, string | null, number];
+            if (db.namespaces.some((n) => n.username_ci === usernameCi)) throw new Error('UNIQUE constraint failed: namespaces.username_ci');
+            db.namespaces.push({ username_ci: usernameCi, kind, user_email: userEmail, user_id: userId, created_at: createdAt });
             return { success: true } as never;
           }
           if (query.startsWith('INSERT OR IGNORE INTO namespaces')) {
-            const [usernameCi, kind, userEmail, createdAt] = bindings as [string, string, string | null, number];
+            const [usernameCi, kind, userEmail, userId, createdAt] = bindings as [string, string, string | null, string | null, number];
             if (db.namespaces.every((n) => n.username_ci !== usernameCi)) {
-              db.namespaces.push({ username_ci: usernameCi, kind, user_email: userEmail, created_at: createdAt });
+              db.namespaces.push({ username_ci: usernameCi, kind, user_email: userEmail, user_id: userId, created_at: createdAt });
             }
             return { success: true } as never;
           }
+          // `setUsername`/`ensureUsername` bind (value, now, idOrEmail, idOrEmail)
+          // — the predicate matches either the account key or the anchor.
           if (query.startsWith('UPDATE users SET username = ?')) {
-            const [username, now, email] = bindings as [string, number, string];
-            const row = db.users.find((u) => u.email.toLowerCase() === email.toLowerCase());
+            const [username, now, idOrEmail] = bindings as [string, number, string];
+            const row = db.users.find((u) => u.id === idOrEmail || u.email === idOrEmail.toLowerCase());
             if (row) {
+              row.username = username;
+              row.updated_at = now;
+            }
+            return { success: true } as never;
+          }
+          if (query.startsWith('UPDATE users SET username = COALESCE')) {
+            const [username, now, idOrEmail] = bindings as [string, number, string];
+            const row = db.users.find((u) => u.id === idOrEmail || u.email === idOrEmail.toLowerCase());
+            if (row && !row.username) {
               row.username = username;
               row.updated_at = now;
             }
@@ -57,10 +101,7 @@ function makeD1(db: Db) {
           if (query.startsWith('UPDATE dav_volumes SET owner = ?')) {
             const [newOwner, newOwnerCi, now, oldOwnerCi] = bindings as [string, string, number, string];
             for (const volume of db.volumes) {
-              if (volume.owner_ci !== oldOwnerCi.toLowerCase()) {
-                continue;
-              }
-
+              if (volume.owner_ci !== oldOwnerCi.toLowerCase()) continue;
               volume.owner = newOwner;
               volume.owner_ci = newOwnerCi.toLowerCase();
               void now;
@@ -74,9 +115,14 @@ function makeD1(db: Db) {
   };
 }
 
+function seedUser(db: Db, id: string, email: string, username: string | null): void {
+  db.users.push({ id, email, current_email: email, created_at: 1, username, updated_at: 1 });
+  db.userEmails.push({ email, user_id: id, is_verified: 1, created_at: 1 });
+  if (username) db.namespaces.push({ username_ci: username.toLowerCase(), kind: 'user', user_email: email, user_id: id, created_at: 1 });
+}
+
 function seedAlice(db: Db): void {
-  db.users.push({ email: 'alice@example.com', created_at: 1, username: 'alice', updated_at: 1 });
-  db.namespaces.push({ username_ci: 'alice', kind: 'user', user_email: 'alice@example.com', created_at: 1 });
+  seedUser(db, 'usr_alice', 'alice@example.com', 'alice');
 }
 
 describe('DavVolumeDAO.renameOwner', () => {
@@ -102,24 +148,52 @@ describe('UserService rename with volume cascade', () => {
   it('renames, reserves the old name for others, cascades volumes, and allows self reclaim', async () => {
     const db = fakeDb();
     seedAlice(db);
-    db.volumes.push({ id: 'vol-1', owner_email: 'alice@example.com', owner: 'alice', name: 'photos', owner_ci: 'alice' });
+    db.volumes.push({
+      id: 'vol-1',
+      owner_email: 'alice@example.com',
+      owner_user_id: 'usr_alice',
+      owner: 'alice',
+      name: 'photos',
+      owner_ci: 'alice',
+    });
     const svc = new UserService({ DB: makeD1(db) as never });
 
     const renamed = await svc.renameUsername('alice@example.com', 'Alice2');
-    expect(renamed).toEqual({ email: 'alice@example.com', username: 'Alice2' });
+    expect(renamed).toEqual({ id: 'usr_alice', email: 'alice@example.com', username: 'Alice2' });
+    // The account id and the frozen anchor are untouched by a rename: only the
+    // handle moves.
+    expect(db.users[0]?.id).toBe('usr_alice');
+    expect(db.users[0]?.email).toBe('alice@example.com');
     expect(db.namespaces.some((n) => n.username_ci === 'alice')).toBe(true);
     expect(db.volumes[0]?.owner).toBe('Alice2');
     expect(db.volumes[0]?.owner_ci).toBe('alice2');
 
-    db.users.push({ email: 'bob@x.co', created_at: 1, username: 'bob', updated_at: 1 });
+    seedUser(db, 'usr_bob', 'bob@x.co', 'bob');
     const bobSvc = new UserService({ DB: makeD1(db) as never });
     await expect(bobSvc.renameUsername('bob@x.co', 'alice')).rejects.toThrow('already taken');
 
     await expect(svc.renameUsername('alice@example.com', 'alice')).resolves.toEqual({
+      id: 'usr_alice',
       email: 'alice@example.com',
       username: 'alice',
     });
     await expect(svc.renameUsername('alice@example.com', 'ALICE')).resolves.toMatchObject({ username: 'alice' });
+  });
+
+  it('resolves the account from the current address, not the anchor', async () => {
+    // After an address change the anchor lookup fails and the registry lookup
+    // succeeds — the property that makes an address change non-fatal.
+    const db = fakeDb();
+    seedUser(db, 'usr_alice', 'old@x.co', 'alice');
+    db.userEmails.push({ email: 'new@x.co', user_id: 'usr_alice', is_verified: 1, created_at: 2 });
+    db.users[0]!.current_email = 'new@x.co';
+
+    const svc = new UserService({ DB: makeD1(db) as never });
+    await expect(svc.renameUsername('new@x.co', 'alice2')).resolves.toEqual({
+      id: 'usr_alice',
+      email: 'new@x.co',
+      username: 'alice2',
+    });
   });
 
   it('reclaims a self-owned namespace when the claim races', async () => {
@@ -127,17 +201,26 @@ describe('UserService rename with volume cascade', () => {
     const svc = new UserService({ DB: {} } as never, {
       userDAO: () =>
         Promise.resolve({
-          getByEmail: async () => ({ email: 'alice@example.com', username: 'alice' }),
+          getById: async () => null,
+          getByCurrentEmail: async () => ({ id: 'usr_alice', email: 'alice@example.com', current_email: 'alice@example.com', username: 'alice' }),
           getByUsernameCi: async () => null,
           setUsername: async () => undefined,
         }) as never,
+      userEmailDAO: () => Promise.resolve({ get: async () => null } as never),
       namespaceDAO: () =>
         Promise.resolve({
           isTaken: async () => false,
           claim: async () => {
             throw new Error('UNIQUE constraint failed: namespaces.username_ci');
           },
-          get: async () => ({ username_ci: 'alice2', kind: 'user', user_email: 'alice@example.com', created_at: 1 }),
+          // Owned by self, so this is a rename-back rather than a conflict.
+          get: async () => ({
+            username_ci: 'alice2',
+            kind: 'user',
+            user_email: 'alice@example.com',
+            user_id: 'usr_alice',
+            created_at: 1,
+          }),
           release: async () => {
             released += 1;
           },
@@ -145,6 +228,7 @@ describe('UserService rename with volume cascade', () => {
       volumeDAO: () => Promise.resolve({ renameOwner: async () => undefined }) as never,
     });
     await expect(svc.renameUsername('alice@example.com', 'alice2')).resolves.toEqual({
+      id: 'usr_alice',
       email: 'alice@example.com',
       username: 'alice2',
     });
@@ -156,12 +240,14 @@ describe('UserService rename with volume cascade', () => {
     const svc = new UserService({ DB: {} } as never, {
       userDAO: () =>
         Promise.resolve({
-          getByEmail: async () => ({ email: 'alice@example.com', username: 'alice' }),
+          getById: async () => null,
+          getByCurrentEmail: async () => ({ id: 'usr_alice', email: 'alice@example.com', current_email: 'alice@example.com', username: 'alice' }),
           getByUsernameCi: async () => null,
           setUsername: async () => {
             throw new Error('D1 busy');
           },
         }) as never,
+      userEmailDAO: () => Promise.resolve({ get: async () => null } as never),
       namespaceDAO: () =>
         Promise.resolve({
           isTaken: async () => false,
@@ -180,8 +266,7 @@ describe('UserService rename with volume cascade', () => {
   it('rejects taken, invalid, reserved, and missing renames', async () => {
     const db = fakeDb();
     seedAlice(db);
-    db.users.push({ email: 'bob@x.co', created_at: 1, username: 'taken2', updated_at: 1 });
-    db.namespaces.push({ username_ci: 'taken2', kind: 'user', user_email: 'bob@x.co', created_at: 1 });
+    seedUser(db, 'usr_bob', 'bob@x.co', 'taken2');
     const svc = new UserService({ DB: makeD1(db) as never });
     await expect(svc.renameUsername('alice@example.com', 'taken2')).rejects.toThrow('already taken');
     await expect(svc.renameUsername('alice@example.com', 'bad name!')).rejects.toThrow('Invalid username');
@@ -191,7 +276,7 @@ describe('UserService rename with volume cascade', () => {
 
   it('falls back to legacy usernames when the namespace table is missing', async () => {
     const db = fakeDb();
-    db.users.push({ email: 'legacy@x.co', created_at: 1, username: 'legacy', updated_at: 1 });
+    seedUser(db, 'usr_legacy', 'legacy@x.co', 'legacy');
     const throwing = {
       prepare: (query: string) => {
         if (query.includes('namespaces')) {
@@ -207,6 +292,10 @@ describe('UserService rename with volume cascade', () => {
       },
     };
     const svc = new UserService({ DB: throwing as never });
-    await expect(svc.renameUsername('legacy@x.co', 'legacy2')).resolves.toEqual({ email: 'legacy@x.co', username: 'legacy2' });
+    await expect(svc.renameUsername('legacy@x.co', 'legacy2')).resolves.toEqual({
+      id: 'usr_legacy',
+      email: 'legacy@x.co',
+      username: 'legacy2',
+    });
   });
 });

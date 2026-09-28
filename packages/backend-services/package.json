@@ -10,6 +10,8 @@
     "./auth/*": "./src/auth/*.ts",
     "./user": "./src/user/index.ts",
     "./user/*": "./src/user/*.ts",
+    "./identity": "./src/identity/index.ts",
+    "./identity/*": "./src/identity/*.ts",
     "./composition": "./src/composition/index.ts",
     "./composition/*": "./src/composition/*.ts",
     "./errors": "./src/errors/index.ts",

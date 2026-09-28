@@ -1,7 +1,10 @@
 import { Tokens } from '@durable-dav/backend-services/composition';
+import { isVolumeOwner } from '@durable-dav/backend-services/dav';
+import type { ViewerIdentity } from '@durable-dav/backend-services/dav';
 import type { DavVolumeRow } from '@durable-dav/backend-data/dao';
 import type { Container } from '@durable-dav/backend-runtime/di';
 import { BaseRoute } from '@/endpoints/IBaseRoute';
+
 import type { ApiContext } from '@/types/ApiContext';
 
 /**
@@ -10,9 +13,18 @@ Everything a volume-scoped handler needs after the guard has run.
 export interface VolumeRequestContext {
   scope: Container;
   /**
-  Authenticated caller's email, lowercased.
+  The caller's sign-in address, lowercased. For display and the rate-limit key.
   */
   email: string;
+  /**
+  The caller's stable account key (migration 0004), or null on a pre-0004
+  database. What ownership is decided on.
+  */
+  userId: string | null;
+  /**
+  The caller as the ownership helpers see one.
+  */
+  viewer: ViewerIdentity;
   /**
   Canonical owner handle from D1 (not the raw URL segment).
   */
@@ -28,15 +40,15 @@ export interface VolumeRequestContext {
 }
 
 /**
- * How a volume-scoped plane reports "not yours".
- *
- * The two planes deliberately differ: the session-authenticated browser plane
- * hides existence (404) so a stranger cannot probe which buckets exist, while
- * the credential plane returns 403. Centralising the choice here is what keeps
- * that documented invariant from drifting — it had already drifted once, with
- * `CredentialRoutes` returning 403 on a foreign volume while the browser plane
- * returned 404.
- */
+How a volume-scoped plane reports "not yours".
+
+The two planes deliberately differ: the session-authenticated browser plane
+hides existence (404) so a stranger cannot probe which buckets exist, while
+the credential plane returns 403. Centralising the choice here is what keeps
+that documented invariant from drifting — it had already drifted once, with
+`CredentialRoutes` returning 403 on a foreign volume while the browser plane
+returned 404.
+*/
 type NotOwnerStatus = 403 | 404;
 
 const UNAUTHORIZED_BODY = { Exception: { Type: 'Unauthorized', Message: 'Unauthorized' } } as const;
@@ -46,18 +58,14 @@ const FORBIDDEN_BODY = { Exception: { Type: 'Forbidden', Message: 'Forbidden' } 
 /**
  * Resolve the authenticated caller, or answer 401.
  *
- * `/user/*` is already behind `userAuthentication()`, so this reads the value
- * that middleware stored rather than re-running the whole authentication
- * chain. `VolumeRoutes` used to call `getAuthenticatedUserEmail` a *second*
- * time on five handlers — two full passes per request, each potentially a JWKS
- * resolve or `ctx.access.getIdentity()` round trip, with a hardcoded
- * non-i18n `'Unauthorized'` body instead of the shared one.
+ * `/user/*` is already behind `userAuthentication()`, so this reads the values
+ * that middleware stored rather than re-running the whole authentication chain.
+ * The typed-as-always-present email is guarded because its absence would
+ * otherwise be a `TypeError` (500) rather than a 401.
  */
-function requireUser(c: ApiContext): string | Response {
+function requireUser(c: ApiContext): Response | { email: string; userId: string | null } {
   const email = c.get('AuthenticatedUserEmailAddress');
-  // Typed as always-present, but the value is absent if middleware ordering
-  // ever changes; the guard turns a would-be TypeError (500) into a 401.
-  return typeof email !== 'string' || email === '' ? c.json(UNAUTHORIZED_BODY, 401) : email.toLowerCase();
+  return typeof email !== 'string' || email === '' ? c.json(UNAUTHORIZED_BODY, 401) : { email: email.toLowerCase(), userId: (c.get('AuthenticatedUserId')) ?? null };
 }
 
 /**
@@ -88,8 +96,9 @@ abstract class VolumeScopedRoute {
   }
 
   private async guard(c: ApiContext): Promise<Response> {
-    const email = requireUser(c);
-    if (email instanceof Response) return email;
+    const identity = requireUser(c);
+    if (identity instanceof Response) return identity;
+    const { email, userId } = identity;
 
     const scope = BaseRoute.getScope(c);
     const owner = (c.req.param('owner') ?? '').trim();
@@ -98,10 +107,11 @@ abstract class VolumeScopedRoute {
     // missing bucket, so clients cached a 404 for a bucket that still existed.
     const row = await scope.get(Tokens.VolumeService).getVolume(owner, volume);
     if (!row) return c.json(NOT_FOUND_BODY, 404);
-    if (row.owner_email.toLowerCase() !== email) {
+    const viewer: ViewerIdentity = { userId, email };
+    if (!isVolumeOwner(viewer, row)) {
       return this.notOwnerStatus === 404 ? c.json(NOT_FOUND_BODY, 404) : c.json(FORBIDDEN_BODY, 403);
     }
-    return this.run(c, { scope, email, owner: row.owner, volume: row.name, row });
+    return this.run(c, { scope, email, userId, viewer, owner: row.owner, volume: row.name, row });
   }
 }
 
@@ -120,5 +130,7 @@ async function withErrorMapping(c: ApiContext, run: () => Promise<Response>): Pr
   }
 }
 
-export { VolumeScopedRoute, requireUser, withErrorMapping };
+export { VolumeScopedRoute, requireUser, withErrorMapping,  };
 export type { NotOwnerStatus };
+
+export {MiddlewareHandlers} from '@/middleware/MiddlewareHandlers';

@@ -201,6 +201,12 @@ function davHeaders(c: DavContext, auth: DavAuthResult, base: string, inner: str
   // `X-Dav-User: admin@…` through untouched on an anonymous read of a public
   // volume. Nothing consumes it today, but it is a header-injection primitive
   // one refactor away from mattering.
+  //
+  // The value is the owner's *current* sign-in address (resolved from
+  // `owner_user_id` in `DavAuth`), not the frozen `owner_email` anchor, so the
+  // DO never records an address the owner does not actually use. It is still
+  // attacker-controllable in the sense that any bucket credential holder can
+  // reach the owner of that bucket — which is the credential's entire purpose.
   h.set('X-Dav-User', auth.userEmail ?? '');
   // The DO never reads Authorization; do not hand credentials down.
   h.delete('Authorization');

@@ -1,4 +1,6 @@
 import type { DavVolumeRow } from '@durable-dav/backend-data/dao';
+import { isVolumeOwner } from './volumeOwnership';
+import type { ViewerIdentity } from './volumeOwnership';
 
 /**
  * The role a viewer holds on a volume.
@@ -18,9 +20,9 @@ interface DavPermissionServiceEnv {
 class DavPermissionService {
   constructor(_env?: DavPermissionServiceEnv) {}
 
-  public getRole(viewerEmail: string | null, volume: DavVolumeRow): Promise<DavPermission | null> {
+  public getRole(viewer: ViewerIdentity | null, volume: DavVolumeRow): Promise<DavPermission | null> {
     const isPrivate = Number(volume.is_private) === 1;
-    if (viewerEmail && viewerEmail.toLowerCase() === volume.owner_email.toLowerCase()) return Promise.resolve('admin');
+    if (isVolumeOwner(viewer, volume)) return Promise.resolve('admin');
     return isPrivate ? Promise.resolve(null) : Promise.resolve('read');
   }
 }

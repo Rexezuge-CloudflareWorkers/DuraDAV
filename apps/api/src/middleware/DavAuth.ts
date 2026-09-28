@@ -1,12 +1,13 @@
 import type { Context } from 'hono';
 import { Tokens } from '@durable-dav/backend-services/composition';
+import type { DavVolumeRow } from '@durable-dav/backend-data/dao';
 import { DavCredentialUtil } from '@durable-dav/shared/utils';
 import type { DavHrefPrefixMode } from '@durable-dav/shared/constants';
 import { readDavHrefPrefixMode } from '@durable-dav/shared/constants';
 import { DatabaseError } from '@durable-dav/backend-errors';
 import { BaseRoute } from '../endpoints/IBaseRoute';
 
-type RequestContext = Context<{ Bindings: Env; Variables: { AuthenticatedUserEmailAddress: string } }>;
+type RequestContext = Context<{ Bindings: Env; Variables: { AuthenticatedUserEmailAddress: string; AuthenticatedUserId?: string } }>;
 
 function getScope(c: RequestContext): ReturnType<typeof BaseRoute.getScope> {
   return BaseRoute.getScope(c);
@@ -23,9 +24,22 @@ function getScope(c: RequestContext): ReturnType<typeof BaseRoute.getScope> {
  */
 export interface DavAuthResult {
   /**
-  Authenticated owner email, or `null` for an anonymous read of a public bucket.
+  The owner's *current* sign-in address, or `null` for an anonymous read of a
+  public bucket.
+
+  Resolved from the volume's `owner_user_id` when migration 0004 has run, rather
+  than read straight off `owner_email`. `owner_email` is the frozen anchor — it
+  never changes, and for an account created against a reused address it is an
+  opaque `anchor-…@users.invalid` — so forwarding it would hand the DO an address
+  the owner does not sign in with. Falls back to the anchor only when the row
+  predates the backfill.
   */
   userEmail: string | null;
+  /**
+  The owner's stable account id, or `null` on a pre-0004 row. What the DO-facing
+  attribution and any future per-account accounting should key on.
+  */
+  userId: string | null;
   /**
   Canonical (DB-resolved) owner handle, for the `X-Dav-Base` prefix.
   */
@@ -82,6 +96,27 @@ function unauthorizedDav(): Response {
  */
 function hrefModeOf(volume: { href_prefix_mode: string }): DavHrefPrefixMode {
   return readDavHrefPrefixMode(volume.href_prefix_mode);
+}
+
+/**
+ * The owner's live address and account key, for the `X-Dav-User` header.
+ *
+ * `owner_email` is the frozen anchor, so it is only the answer on a row that
+ * predates migration 0004's backfill. When the row carries `owner_user_id` the
+ * current address is read from `users` — one extra D1 read, only on a
+ * credential-authenticated request, and only when it can change the answer.
+ * A lookup failure is not fatal: the anchor is a safe (if stale) fallback, and
+ * this runs after the request has already been authorized.
+ */
+async function ownerIdentity(scope: ReturnType<typeof getScope>, volume: DavVolumeRow): Promise<{ userEmail: string; userId: string | null }> {
+  const ownerUserId = volume.owner_user_id;
+  if (!ownerUserId) return { userEmail: volume.owner_email, userId: null };
+  try {
+    const account = await scope.get(Tokens.UserIdentityService).resolveUserById(ownerUserId);
+    return { userEmail: account?.email ?? volume.owner_email, userId: account?.id ?? ownerUserId };
+  } catch {
+    return { userEmail: volume.owner_email, userId: ownerUserId };
+  }
 }
 
 async function davAuthForVolume(
@@ -149,14 +184,18 @@ async function davAuthForVolumeInner(
     // `last_used_at` is genuinely best-effort telemetry; a failure here must
     // not fail an otherwise-valid request.
     await credentialDAO.updateLastUsed(credential.credentialId).catch(() => undefined);
-    return { userEmail: volume.owner_email, owner: volume.owner, volume: volume.name, hrefPrefixMode: hrefModeOf(volume) };
+    const identity = await ownerIdentity(scope, volume);
+    return { ...identity, owner: volume.owner, volume: volume.name, hrefPrefixMode: hrefModeOf(volume) };
   }
 
   // No credential: public buckets allow anonymous reads only; all writes
   // and all private access require a bucket credential.
   if (!needWrite && !isPrivate) {
     const role = await scope.get(Tokens.DavPermissionService).getRole(null, volume);
-    return role ? { userEmail: null, owner: volume.owner, volume: volume.name, hrefPrefixMode: hrefModeOf(volume) } : unauthorizedDav();
+    // An anonymous read is anonymous even on a public bucket: there is no
+    // caller to attribute, so this reports no owner identity rather than
+    // claiming the volume's owner made the request.
+    return role ? { userEmail: null, userId: null, owner: volume.owner, volume: volume.name, hrefPrefixMode: hrefModeOf(volume) } : unauthorizedDav();
   }
   return unauthorizedDav();
 }

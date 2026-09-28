@@ -12,19 +12,49 @@ export async function ensureAesSecret(_env: TestEnv): Promise<void> {
   // No Secrets Store binding: credential hashing is sha256 (no encryption).
 }
 
+/**
+ * Seed a user in the post-0004 shape.
+ *
+ * Writes all three identity pieces, not just the anchor: `users.id` and
+ * `current_email` (the stable account key and the mutable sign-in address), the
+ * `user_emails` registry row that login resolution actually goes through, and
+ * the `user_id` on the namespace claim. A seed that skipped these would produce
+ * a state the migration never creates, and the tests that depend on id-keyed
+ * ownership would pass for the wrong reason.
+ */
 export async function ensureUser(db: D1Database, email: string, username?: string): Promise<string> {
   const now = Math.floor(Date.now() / 1000);
   const normalizedEmail = email.toLowerCase();
   const handle = (username ?? normalizedEmail.split('@', 1)[0]).trim() || 'user';
   const handleCi = handle.toLowerCase();
-  await db.prepare(`INSERT OR IGNORE INTO users (email, created_at) VALUES (?, ?)`).bind(normalizedEmail, now).run();
+  const id = `usr_${crypto.randomUUID().replaceAll('-', '')}`;
   await db
-    .prepare(`UPDATE users SET username = COALESCE(username, ?), updated_at = COALESCE(updated_at, ?) WHERE email = ?`)
-    .bind(handle, now, normalizedEmail)
+    .prepare(
+      `INSERT INTO users (email, created_at, id, current_email) VALUES (?, ?, ?, ?)
+       ON CONFLICT(email) DO UPDATE SET current_email = COALESCE(users.current_email, excluded.current_email)`,
+    )
+    .bind(normalizedEmail, now, id, normalizedEmail)
+    .run();
+  // Read the id back: on a conflict the row kept its original, and the registry
+  // must point at *that* account.
+  const row = await db.prepare('SELECT id, current_email FROM users WHERE email = ?').bind(normalizedEmail).first<{ id: string; current_email: string }>();
+  const userId = row?.id ?? id;
+  await db
+    .prepare('UPDATE users SET username = COALESCE(username, ?), updated_at = COALESCE(updated_at, ?) WHERE id = ?')
+    .bind(handle, now, userId)
     .run();
   await db
-    .prepare(`INSERT OR IGNORE INTO namespaces (username_ci, kind, user_email, created_at) VALUES (?, 'user', ?, ?)`)
-    .bind(handleCi, normalizedEmail, now)
+    .prepare(
+      `INSERT INTO user_emails (email, user_id, is_verified, created_at) VALUES (?, ?, 1, ?)
+       ON CONFLICT(email) DO NOTHING`,
+    )
+    .bind(normalizedEmail, userId, now)
+    .run();
+  await db
+    .prepare(
+      `INSERT OR IGNORE INTO namespaces (username_ci, kind, user_email, user_id, created_at) VALUES (?, 'user', ?, ?, ?)`,
+    )
+    .bind(handleCi, normalizedEmail, userId, now)
     .run();
   return handle;
 }
@@ -50,14 +80,17 @@ export async function seedVolume(
   const id = crypto.randomUUID();
   const now = Math.floor(Date.now() / 1000);
   const ownerUsername = await ensureUser(db, input.ownerEmail, input.owner);
+  // The owner account key: ownership is decided on this, not on the address.
+  const owner = await db.prepare('SELECT id FROM users WHERE email = ?').bind(input.ownerEmail.toLowerCase()).first<{ id: string }>();
   await db
     .prepare(
-      `INSERT OR IGNORE INTO dav_volumes (id, owner_email, owner, name, description, is_private, created_at, updated_at, owner_ci, name_ci) ` +
-        `VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT OR IGNORE INTO dav_volumes (id, owner_email, owner_user_id, owner, name, description, is_private, created_at, updated_at, owner_ci, name_ci) ` +
+        `VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
     .bind(
       id,
       input.ownerEmail.toLowerCase(),
+      owner?.id ?? null,
       ownerUsername,
       input.name,
       input.description ?? null,

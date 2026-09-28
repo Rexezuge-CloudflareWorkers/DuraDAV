@@ -1,6 +1,6 @@
 import type { Context, Next } from 'hono';
 
-type RateLimitContext = Context<{ Bindings: Env; Variables: { AuthenticatedUserEmailAddress: string } }>;
+type RateLimitContext = Context<{ Bindings: Env; Variables: { AuthenticatedUserEmailAddress: string; AuthenticatedUserId?: string } }>;
 
 interface Bucket {
   count: number;

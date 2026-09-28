@@ -227,34 +227,15 @@ async function invalidateVolumeCaches(cache: KvCache, owner: string, volume: str
   // outlived the write and matched nothing, but the free plan meters a delete
   // against a key that does not exist exactly like one that does, so every
   // content-mutating DAV request was spending a unit of the 1,000/day budget on
-  // a guaranteed miss. `davMeta` now holds only the per-owner volume *list*
-  // (`davMeta:v1:volumes:<email>`), which is keyed on the owner rather than the
-  // volume and is invalidated by `invalidateVolumeListCache` instead.
+  // a guaranteed miss. `davMeta` now holds only the per-owner volume *list`,
+  // which is keyed on the owner rather than the volume and is invalidated by
+  // `invalidateVolumeListCache` instead.
 }
 
-async function invalidateVolumeListCache(cache: KvCache, ownerEmail: string): Promise<void> {
-  try {
-    await cache.del('davMeta', ['volumes', ownerEmail.toLowerCase()]);
-  } catch {
-    // Best-effort invalidation.
-  }
-}
-
-async function getCachedVolumeList<T>(cache: KvCache, ownerEmail: string): Promise<T | null> {
-  try {
-    return await cache.getJson<T>('davMeta', ['volumes', ownerEmail.toLowerCase()]);
-  } catch {
-    return null;
-  }
-}
-
-async function putCachedVolumeList(cache: KvCache, ownerEmail: string, value: unknown): Promise<void> {
-  try {
-    await cache.putJson('davMeta', ['volumes', ownerEmail.toLowerCase()], value, { ttlSeconds: DAV_META_TTL_SECONDS });
-  } catch {
-    // Best-effort cache population.
-  }
-}
+// The per-owner volume list lives in `DavVolumeListCache`: it is keyed on the
+// account id (migration 0004) rather than the caller's address, and the reason
+// is explained there.
+export { getCachedVolumeList, invalidateVolumeListCache, putCachedVolumeList } from './DavVolumeListCache';
 
 export {
   DAV_META_TTL_SECONDS,
@@ -272,9 +253,6 @@ export {
   getCachedFile,
   putCachedFile,
   invalidateVolumeCaches,
-  invalidateVolumeListCache,
-  getCachedVolumeList,
-  putCachedVolumeList,
   bytesToBase64,
   base64ToBytes,
   invalidatesReadCache,

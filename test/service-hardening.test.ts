@@ -33,6 +33,11 @@ function lockSql(rowsByPath: LockRowMap) {
 }
 
 describe('VolumeService quota hardening', () => {
+  // The quota counts by account key (migration 0004), not by address: a user who
+  // changed address still owns the same buckets, and an email-keyed count would
+  // read as zero and let them exceed the limit.
+  const identity = () => Promise.resolve({ resolveAccount: async () => ({ id: 'usr_a', email: 'a@x.co', anchorEmail: 'a@x.co', username: 'alice' }) } as never);
+
   it('prefers COUNT(*) over listing rows', async () => {
     let listed = false;
     const svc = new VolumeService(
@@ -40,14 +45,14 @@ describe('VolumeService quota hardening', () => {
       {
         volumeDAO: () =>
           Promise.resolve({
-            countByOwnerEmail: async () => 1,
-            listByOwnerEmail: async () => {
+            countByOwnerUserId: async () => 1,
+            listByOwnerUserId: async () => {
               listed = true;
               return [];
             },
             getByOwnerName: async () => null,
           } as never),
-        userDAO: () => Promise.resolve({ getByEmail: async () => ({ username: 'alice' }) } as never),
+        identity,
         credentialDAO: () => Promise.resolve({} as never),
       },
     );
@@ -61,17 +66,45 @@ describe('VolumeService quota hardening', () => {
       {
         volumeDAO: () =>
           Promise.resolve({
-            countByOwnerEmail: async () => {
+            countByOwnerUserId: async () => {
               throw new Error('no such function: count');
             },
-            listByOwnerEmail: async () => [{ id: 'v1' }],
+            listByOwnerUserId: async () => [{ id: 'v1' }],
             getByOwnerName: async () => null,
           } as never),
-        userDAO: () => Promise.resolve({ getByEmail: async () => ({ username: 'alice' }) } as never),
+        identity,
         credentialDAO: () => Promise.resolve({} as never),
       },
     );
     await expect(svc.createVolume({ owner: 'alice', name: 'b1', creatorEmail: 'a@x.co' })).rejects.toThrow(/Maximum 1 volumes/);
+  });
+
+  it('fails closed when the caller has no resolvable account', async () => {
+    // The ownership check is skipped entirely when the account cannot be
+    // resolved, so this must throw rather than return null and let `createVolume`
+    // proceed. Regression: a D1 blip used to let an authenticated caller create
+    // buckets in any user's namespace.
+    const svc = new VolumeService(
+      { DB: {} as never },
+      {
+        volumeDAO: () => Promise.resolve({ getByOwnerName: async () => null } as never),
+        identity: () => Promise.resolve({ resolveAccount: async () => null } as never),
+        credentialDAO: () => Promise.resolve({} as never),
+      },
+    );
+    await expect(svc.createVolume({ owner: 'mallory', name: 'b1', creatorEmail: 'a@x.co' })).rejects.toThrow(/No account is provisioned/);
+  });
+
+  it('fails closed when the account exists but has no handle', async () => {
+    const svc = new VolumeService(
+      { DB: {} as never },
+      {
+        volumeDAO: () => Promise.resolve({ getByOwnerName: async () => null } as never),
+        identity: () => Promise.resolve({ resolveAccount: async () => ({ id: 'usr_a', email: 'a@x.co', anchorEmail: 'a@x.co', username: null }) } as never),
+        credentialDAO: () => Promise.resolve({} as never),
+      },
+    );
+    await expect(svc.createVolume({ owner: 'alice', name: 'b1', creatorEmail: 'a@x.co' })).rejects.toThrow(/No username is provisioned/);
   });
 });
 
