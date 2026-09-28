@@ -1,10 +1,11 @@
-import type { DavCredentialDAO, DavVolumeDAO, NamespaceDAO, UserDAO } from '@durable-dav/backend-data/dao';
+import type { DavCredentialDAO, DavVolumeDAO, NamespaceDAO, UserDAO, UserEmailDAO } from '@durable-dav/backend-data/dao';
 import type { D1Queryable } from '@durable-dav/backend-data/utils';
 import type { Token } from '@durable-dav/backend-runtime/di';
 import type { AppConfiguration } from '@durable-dav/backend-runtime/config';
 import type { KvCache } from '@durable-dav/backend-runtime/kv';
 import type { AccessAuthService } from '../auth/AccessAuthService';
 import type { UserService } from '../user/UserService';
+import type { UserIdentityService } from '../identity/UserIdentityService';
 import type { DavPermissionService } from '../dav/DavPermissionService';
 import type { VolumeService } from '../dav/VolumeService';
 import type { VolumeCredentialService } from '../dav/VolumeCredentialService';
@@ -25,11 +26,13 @@ const Tokens = {
   KvCache: Symbol('KvCache') as Token<KvCache>,
   AppConfig: Symbol('AppConfig') as Token<AppConfiguration>,
   UserDAO: Symbol('UserDAO') as Token<() => Promise<UserDAO>>,
+  UserEmailDAO: Symbol('UserEmailDAO') as Token<() => Promise<UserEmailDAO>>,
   NamespaceDAO: Symbol('NamespaceDAO') as Token<() => Promise<NamespaceDAO>>,
   DavVolumeDAO: Symbol('DavVolumeDAO') as Token<() => Promise<DavVolumeDAO>>,
   DavCredentialDAO: Symbol('DavCredentialDAO') as Token<() => Promise<DavCredentialDAO>>,
   AccessAuthService: Symbol('AccessAuthService') as Token<AccessAuthService>,
   UserService: Symbol('UserService') as Token<UserService>,
+  UserIdentityService: Symbol('UserIdentityService') as Token<UserIdentityService>,
   DavPermissionService: Symbol('DavPermissionService') as Token<DavPermissionService>,
   VolumeService: Symbol('VolumeService') as Token<VolumeService>,
   VolumeCredentialService: Symbol('VolumeCredentialService') as Token<VolumeCredentialService>,

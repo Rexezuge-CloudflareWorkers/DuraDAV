@@ -1,6 +1,6 @@
 import type { Context, Next } from 'hono';
 
-type HeaderContext = Context<{ Bindings: Env; Variables: { AuthenticatedUserEmailAddress: string } }>;
+type HeaderContext = Context<{ Bindings: Env; Variables: { AuthenticatedUserEmailAddress: string; AuthenticatedUserId?: string } }>;
 
 const SECURITY_HEADERS: Record<string, string> = {
   'X-Content-Type-Options': 'nosniff',

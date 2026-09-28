@@ -21,10 +21,14 @@ const migrationFiles = readdirSync(migrationsDir)
   .filter((f) => f.endsWith('.sql'))
   .sort((a, b) => a.localeCompare(b, 'en'));
 const migrationSql = migrationFiles.map((f) => readFileSync(path.resolve(migrationsDir, f), 'utf8')).join('\n\n');
+// Per-file entries alongside the flattened string: the identity-upgrade test
+// seeds the pre-0004 shape, so it must be able to stop between files.
+const migrationFileEntries = migrationFiles.map((name) => ({ name, sql: readFileSync(path.resolve(migrationsDir, name), 'utf8') }));
 
 export default defineConfig({
   define: {
     __INTEGRATION_MIGRATION_SQL__: JSON.stringify(migrationSql),
+    __INTEGRATION_MIGRATION_FILES__: JSON.stringify(migrationFileEntries),
   },
   plugins: [
     cloudflareTest({

@@ -1,6 +1,6 @@
 // Identity/governance bindings: auth, users, volumes, permissions.
-// Single DavPermissionService binding lives here; dependents resolve it via
-// the container, never `new`.
+// Single DavPermissionService and UserIdentityService bindings live here;
+// dependents resolve them via the container, never `new`.
 import { AccessAuthService } from '@durable-dav/backend-services/auth';
 import { DavPermissionService } from '@durable-dav/backend-services/dav';
 import { VolumeService } from '@durable-dav/backend-services/dav';
@@ -12,12 +12,15 @@ import { Tokens } from '../tokens';
 import { createService } from '../serviceFactory';
 import type { ServiceGroupContext } from './daoThunks';
 
-function bindCoreServices(scope: Container, { env, daos }: ServiceGroupContext): void {
+function bindCoreServices(scope: Container, { env, daos, identity }: ServiceGroupContext): void {
   scope.bind(Tokens.AppConfig, () => AppConfiguration.fromEnv(env));
   scope.bind(Tokens.AccessAuthService, () => createService(AccessAuthService, env));
+  // `UserIdentityService` is bound in `serviceBindings.ts` (it is the shared
+  // instance every identity consumer resolves through), not here.
   scope.bind(Tokens.UserService, () =>
     createService(UserService, env, {
       userDAO: daos.userDAO,
+      userEmailDAO: daos.userEmailDAO,
       namespaceDAO: daos.namespaceDAO,
       volumeDAO: daos.davVolumeDAO,
     }),
@@ -26,8 +29,8 @@ function bindCoreServices(scope: Container, { env, daos }: ServiceGroupContext):
   scope.bind(Tokens.VolumeService, () =>
     createService(VolumeService, env, {
       volumeDAO: daos.davVolumeDAO,
-      userDAO: daos.userDAO,
       credentialDAO: daos.davCredentialDAO,
+      identity,
     }),
   );
   scope.bind(Tokens.VolumeCredentialService, () =>

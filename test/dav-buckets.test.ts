@@ -8,24 +8,32 @@ function fakeVolumeDb(opts: { ownedCount?: number; username?: string | null; exi
   const volumeDAO = {
     getByOwnerName: async () => (opts.existing as never) ?? null,
     getById: async () => (opts.existing as never) ?? null,
+    countByOwnerUserId: async () => opts.ownedCount ?? 0,
+    listByOwnerUserId: async () => Array.from({ length: opts.ownedCount ?? 0 }, (_, i) => ({ id: `v${i}` })),
     listByOwnerEmail: async () => Array.from({ length: opts.ownedCount ?? 0 }, (_, i) => ({ id: `v${i}` })),
     create: async () => undefined,
     update: async () => undefined,
     deleteById: async () => undefined,
   };
-  const userDAO = {
-    getByEmail: async () =>
-      opts.username === undefined
-        ? { email: 'a@x.co', username: 'alice' }
-        : opts.username
-          ? { email: 'a@x.co', username: opts.username }
-          : null,
-  };
+  // The caller's account, as `UserIdentityService` would resolve it: a stable
+  // id plus the handle the bucket URL namespace is keyed on.
+  const identity = () =>
+    Promise.resolve({
+      resolveAccount: async () =>
+        opts.username === null
+          ? null
+          : {
+              id: 'usr_alice',
+              email: 'a@x.co',
+              anchorEmail: 'a@x.co',
+              username: opts.username ?? 'alice',
+            },
+    } as never);
   return {
     calls,
     deps: {
       volumeDAO: () => Promise.resolve(volumeDAO as never),
-      userDAO: () => Promise.resolve(userDAO as never),
+      identity,
       credentialDAO: () =>
         Promise.resolve({
           deleteByVolume: async () => {
@@ -64,7 +72,7 @@ describe('VolumeService user-only buckets', () => {
       name: 'photos',
       is_private: 1,
     };
-    const seen: Array<{ isPrivate: boolean }> = [];
+    const seen: Array<{ isPrivate: boolean; ownerEmail: string; ownerUserId: string }> = [];
     const { deps, calls } = fakeVolumeDb({ ownedCount: 0, username: 'alice', existing: null });
     const svc = new VolumeService(
       { DB: {} as never },
@@ -74,9 +82,11 @@ describe('VolumeService user-only buckets', () => {
           Promise.resolve({
             getByOwnerName: async () => null,
             getById: async () => created as never,
+            countByOwnerUserId: async () => 0,
+            listByOwnerUserId: async () => [],
             listByOwnerEmail: async () => [],
-            create: async (input: { isPrivate: boolean }) => {
-              seen.push({ isPrivate: input.isPrivate });
+            create: async (input: { isPrivate: boolean; ownerEmail: string; ownerUserId: string }) => {
+              seen.push({ isPrivate: input.isPrivate, ownerEmail: input.ownerEmail, ownerUserId: input.ownerUserId });
             },
             update: async () => undefined,
             deleteById: async () => undefined,
@@ -86,6 +96,10 @@ describe('VolumeService user-only buckets', () => {
     const row = await svc.createVolume({ owner: 'alice', name: 'photos', creatorEmail: 'A@X.co' });
     expect(row.owner_email).toBe('a@x.co');
     expect(seen[0]?.isPrivate).toBe(true);
+    // The row records the account's frozen anchor, not the address the caller
+    // happened to sign in with — the two differ once an address changes.
+    expect(seen[0]?.ownerEmail).toBe('a@x.co');
+    expect(seen[0]?.ownerUserId).toBe('usr_alice');
 
     const deleter = new VolumeService(
       { DB: {} as never },
@@ -95,6 +109,8 @@ describe('VolumeService user-only buckets', () => {
           Promise.resolve({
             getByOwnerName: async () => created as never,
             getById: async () => created as never,
+            countByOwnerUserId: async () => 0,
+            listByOwnerUserId: async () => [],
             listByOwnerEmail: async () => [],
             create: async () => undefined,
             update: async () => undefined,
@@ -110,6 +126,7 @@ describe('VolumeService user-only buckets', () => {
     const stored = {
       id: 'vol-1',
       owner_email: 'a@x.co',
+      owner_user_id: 'usr_alice',
       owner: 'alice',
       name: 'photos',
       description: null,
@@ -124,6 +141,8 @@ describe('VolumeService user-only buckets', () => {
           Promise.resolve({
             getByOwnerName: async () => stored as never,
             getById: async () => ({ ...stored, description: 'hi', is_private: 0 }) as never,
+            countByOwnerUserId: async () => 0,
+            listByOwnerUserId: async () => [],
             listByOwnerEmail: async () => [],
             create: async () => undefined,
             update: async () => undefined,
@@ -131,25 +150,81 @@ describe('VolumeService user-only buckets', () => {
           } as never),
       },
     );
-    const updated = await svc.updateVolume('alice', 'photos', 'a@x.co', { description: 'hi', isPrivate: false });
+    const updated = await svc.updateVolume('alice', 'photos', { userId: 'usr_alice', email: 'a@x.co' }, { description: 'hi', isPrivate: false });
     expect(updated.description).toBe('hi');
-    await expect(svc.updateVolume('alice', 'photos', 'other@x.co', { isPrivate: true })).rejects.toThrow(/owner/);
+    await expect(svc.updateVolume('alice', 'photos', { userId: 'usr_other', email: 'other@x.co' }, { isPrivate: true })).rejects.toThrow(/owner/);
+  });
+
+  it('keeps ownership after the owner changes their email address', async () => {
+    // The whole point of migration 0004. `owner_email` is the frozen anchor, so
+    // a caller who signs in with a *different* address and the *same* account id
+    // is still the owner — comparing addresses would have locked them out.
+    const stored = {
+      id: 'vol-1',
+      owner_email: 'old@x.co',
+      owner_user_id: 'usr_alice',
+      owner: 'alice',
+      name: 'photos',
+      description: null,
+      is_private: 1,
+    };
+    const svc = new VolumeService(
+      { DB: {} as never },
+      {
+        ...fakeVolumeDb().deps,
+        volumeDAO: () =>
+          Promise.resolve({
+            getByOwnerName: async () => stored as never,
+            getById: async () => ({ ...stored, description: 'renamed' }) as never,
+            update: async () => undefined,
+          } as never),
+      },
+    );
+    const updated = await svc.updateVolume('alice', 'photos', { userId: 'usr_alice', email: 'new@x.co' }, { description: 'renamed' });
+    expect(updated.description).toBe('renamed');
+  });
+
+  it('does not fall back to the anchor when the row has an owner id', async () => {
+    // A pre-0004 row (no `owner_user_id`) may be matched on the address; a
+    // 0004 row must not, or an address re-registered by a different account
+    // would inherit the bucket.
+    const stored = { id: 'v', owner_email: 'shared@x.co', owner_user_id: 'usr_real', owner: 'real', name: 'n', is_private: 1 } as DavVolumeRow;
+    const svc = new VolumeService(
+      { DB: {} as never },
+      { ...fakeVolumeDb().deps, volumeDAO: () => Promise.resolve({ getByOwnerName: async () => stored } as never) },
+    );
+    await expect(svc.updateVolume('real', 'n', { userId: 'usr_imposter', email: 'shared@x.co' }, { description: 'x' })).rejects.toThrow(/owner/);
   });
 });
 
 describe('DavPermissionService owner-only', () => {
-  // `getRole` only reads `owner_email` and `is_private`, so a minimal
-  // projection is enough and keeps the fixture readable.
-  const volume = { id: 'v1', owner_email: 'owner@x.co', is_private: 1 } as DavVolumeRow;
+  // `getRole` reads only the owner key and `is_private`, so a minimal projection
+  // is enough and keeps the fixture readable.
+  const volume = { id: 'v1', owner_email: 'owner@x.co', owner_user_id: 'usr_owner', is_private: 1 } as DavVolumeRow;
 
   it('owner is admin, others hidden on private, public read', async () => {
     const perm = new DavPermissionService();
-    await expect(perm.getRole('owner@x.co', volume)).resolves.toBe('admin');
-    await expect(perm.getRole('friend@x.co', volume)).resolves.toBeNull();
+    await expect(perm.getRole({ userId: 'usr_owner', email: 'owner@x.co' }, volume)).resolves.toBe('admin');
+    await expect(perm.getRole({ userId: 'usr_friend', email: 'friend@x.co' }, volume)).resolves.toBeNull();
     await expect(perm.getRole(null, volume)).resolves.toBeNull();
     const publicVolume: DavVolumeRow = { ...volume, is_private: 0 };
     await expect(perm.getRole(null, publicVolume)).resolves.toBe('read');
-    await expect(perm.getRole('friend@x.co', publicVolume)).resolves.toBe('read');
+    await expect(perm.getRole({ userId: 'usr_friend', email: 'friend@x.co' }, publicVolume)).resolves.toBe('read');
+  });
+
+  it('an anonymous viewer never matches an owner key', async () => {
+    // `getRole(null, ...)` is the public-anon-read path. Before 0004 it took a
+    // nullable email, so a caller could pass the owner address; the id makes
+    // that unrepresentable.
+    const perm = new DavPermissionService();
+    await expect(perm.getRole(null, volume)).resolves.toBeNull();
+  });
+
+  it('a viewer with no resolved id is refused on a keyed row', async () => {
+    // Pre-0004 caller (no `users.id`) against a post-backfill row: refuse, do
+    // not fall back to the anchor.
+    const perm = new DavPermissionService();
+    await expect(perm.getRole({ userId: null, email: 'owner@x.co' }, volume)).resolves.toBeNull();
   });
 });
 

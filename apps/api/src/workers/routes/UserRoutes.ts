@@ -7,25 +7,37 @@ import { requireUser, withErrorMapping } from './VolumeScopedRoute';
 
 type App = ApiApp;
 
+/**
+`GET /user/me` — the caller's own account.
+
+Reports the *current* sign-in address, not the frozen anchor: `users.email` is
+immutable and may be an opaque `anchor-…@users.invalid` for an account created
+against a reused address, so echoing it would show the user a login they do not
+have. The address the request authenticated with is the honest answer.
+*/
 async function handleMe(c: ApiContext): Promise<Response> {
-  const email = requireUser(c);
-  if (email instanceof Response) return email;
+  const identity = requireUser(c);
+  if (identity instanceof Response) return identity;
+  const { email } = identity;
   const scope = BaseRoute.getScope(c);
   // No `.catch(() => null)`: a D1 outage was reported as `username: null`,
   // which the SPA reads as "you still need to pick a handle" and pushes the
   // user into the rename flow during an incident.
   const profile = await scope.get(Tokens.UserService).getProfileByEmail(email);
-  return c.json({ email, username: (profile as { username?: string } | null)?.username ?? null });
+  return c.json({ email, username: profile.username ?? null });
 }
 
 /**
 Owned volume ids+names, snapshotted *before* the D1 rename.
+
+Keyed on the account id so the snapshot is complete for a user who has changed
+their sign-in address since the buckets were created.
 */
-async function snapshotOwnedVolumes(c: ApiContext, email: string): Promise<Array<{ id: string; name: string }>> {
+async function snapshotOwnedVolumes(c: ApiContext, userId: string | null, email: string): Promise<Array<{ id: string; name: string }>> {
   const scope = BaseRoute.getScope(c);
   try {
     const dao = await scope.get(Tokens.DavVolumeDAO)();
-    const rows = await dao.listByOwnerEmail(email, 1000);
+    const rows = userId ? await dao.listByOwnerUserId(userId, 1000) : await dao.listByOwnerEmail(email, 1000);
     const seen = new Set<string>();
     const out: Array<{ id: string; name: string }> = [];
     for (const row of rows) {
@@ -45,12 +57,12 @@ Drop every cached read for the volumes a rename moved.
 */
 async function invalidateRenamedCaches(
   c: ApiContext,
-  email: string,
+  cacheKey: string,
   moves: ReadonlyArray<{ oldFull: string; newFull: string }>,
 ): Promise<void> {
   try {
     const cache = BaseRoute.getScope(c).get(Tokens.KvCache);
-    await invalidateVolumeListCache(cache, email);
+    await invalidateVolumeListCache(cache, cacheKey);
     for (const move of moves) {
       const { owner: oldOwner, volume: oldVolume } = splitFull(move.oldFull);
       const { owner: newOwner, volume: newVolume } = splitFull(move.newFull);
@@ -70,8 +82,9 @@ async function invalidateRenamedCaches(
  * is rolled back so the request surfaces 500 rather than an empty volume.
  */
 async function handleRenameUsername(c: ApiContext): Promise<Response> {
-  const email = requireUser(c);
-  if (email instanceof Response) return email;
+  const identity = requireUser(c);
+  if (identity instanceof Response) return identity;
+  const { email, userId } = identity;
   const { malformed, oversized, body } = await BaseRoute.readJson<{ username?: string }>(c);
   if (oversized) return BaseRoute.jsonError(c, 'Payload too large', 413);
   if (malformed) return BaseRoute.jsonError(c, 'Invalid JSON body', 400);
@@ -85,17 +98,22 @@ async function handleRenameUsername(c: ApiContext): Promise<Response> {
   // Snapshot BEFORE the D1 rename: afterwards `owner_ci` already reads the new
   // handle, so a post-rename filter by the old name matches nothing and the DO
   // move would silently never run.
-  const snapshot = before?.username ? await snapshotOwnedVolumes(c, email) : [];
+  const snapshot = before?.username ? await snapshotOwnedVolumes(c, userId, email) : [];
 
   const renamed = await scope.get(Tokens.UserService).renameUsername(email, body.username);
-  const beforeUsername = before?.username;
-  const handleChanged = Boolean(beforeUsername) && (beforeUsername as string).toLowerCase() !== renamed.username.toLowerCase();
-  if (handleChanged && beforeUsername !== null && snapshot.length > 0) {
+  // `renameUsername` only returns once the handle is set, so it is never null
+  // on this path; the fallback keeps the template string total if that changes.
+  const newUsername = renamed.username ?? '';
+  const beforeUsername = before?.username ?? null;
+  // `getProfileByEmail` returns `AccountSummary`, whose `username` is typed
+  // nullable but is a real handle on this path (a rename always yields one).
+  const handleChanged = beforeUsername != null && beforeUsername.toLowerCase() !== newUsername.toLowerCase();
+  if (handleChanged && snapshot.length > 0) {
     const moves = snapshot.map((volume) => ({
       id: volume.id,
       name: volume.name,
       oldFull: `${beforeUsername}/${volume.name}`,
-      newFull: `${renamed.username}/${volume.name}`,
+      newFull: `${newUsername}/${volume.name}`,
     }));
     try {
       await moveVolumeDosForRename(c.env, moves);
@@ -106,13 +124,13 @@ async function handleRenameUsername(c: ApiContext): Promise<Response> {
         .catch(() => undefined);
       return BaseRoute.jsonError(c, 'Failed to move volume data', 500);
     }
-    await invalidateRenamedCaches(c, email, moves);
+    await invalidateRenamedCaches(c, userId ?? email, moves);
   } else if (handleChanged) {
-    await invalidateRenamedCaches(c, email, []);
+    await invalidateRenamedCaches(c, userId ?? email, []);
   }
 
   const profile = await scope.get(Tokens.UserService).getProfileByEmail(email);
-  return c.json({ email: profile.email, username: profile.username });
+  return c.json({ email, username: profile.username });
 }
 
 /**

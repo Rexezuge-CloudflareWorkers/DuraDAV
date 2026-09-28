@@ -58,7 +58,7 @@ const RATE_LIMIT_DEFS: readonly RateLimitDef[] = [
   },
 ];
 
-function registerRateLimits(app: Hono<{ Bindings: Env; Variables: { AuthenticatedUserEmailAddress: string } }>): void {
+function registerRateLimits(app: Hono<{ Bindings: Env; Variables: { AuthenticatedUserEmailAddress: string; AuthenticatedUserId?: string } }>): void {
   for (const def of RATE_LIMIT_DEFS) {
     const middleware = rateLimit({ windowMs: def.windowMs, max: def.max, keyPrefix: def.keyPrefix });
     app.use(def.path, async (c, next) => {

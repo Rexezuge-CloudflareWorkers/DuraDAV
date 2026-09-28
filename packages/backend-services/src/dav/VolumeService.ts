@@ -1,4 +1,4 @@
-import { DavCredentialDAO, DavVolumeDAO, UserDAO } from '@durable-dav/backend-data/dao';
+import { DavCredentialDAO, DavVolumeDAO } from '@durable-dav/backend-data/dao';
 import type { DavVolumeRow } from '@durable-dav/backend-data/dao';
 import type { D1Queryable } from '@durable-dav/backend-data/utils';
 import { BadRequestError, ForbiddenError, NotFoundError } from '@durable-dav/backend-errors';
@@ -8,6 +8,10 @@ import { TimestampUtil, UUIDUtil } from '@durable-dav/shared/utils';
 import { AppConfiguration } from '@durable-dav/backend-runtime/config';
 import { checkVolumeQuota, validateVolumePatch } from './VolumeCreatePolicy';
 import type { VolumePatch } from './VolumeCreatePolicy';
+import { isVolumeOwner } from './volumeOwnership';
+import type { ViewerIdentity } from './volumeOwnership';
+import { UserIdentityService } from '../identity/UserIdentityService';
+import type { ResolvedAccount } from '../user/accountLookup';
 
 interface VolumeServiceEnv {
   DB: D1Queryable;
@@ -16,13 +20,13 @@ interface VolumeServiceEnv {
 
 interface VolumeServiceDeps {
   volumeDAO?: () => Promise<DavVolumeDAO>;
-  userDAO?: () => Promise<UserDAO>;
   credentialDAO?: () => Promise<DavCredentialDAO>;
+  identity?: () => Promise<UserIdentityService>;
   config?: AppConfiguration;
 }
 
 class VolumeService {
-  private readonly deps: Required<Pick<VolumeServiceDeps, 'volumeDAO' | 'userDAO' | 'credentialDAO' | 'config'>>;
+  private readonly deps: Required<Pick<VolumeServiceDeps, 'volumeDAO' | 'credentialDAO' | 'identity' | 'config'>>;
 
   constructor(
     private readonly env: VolumeServiceEnv,
@@ -30,8 +34,8 @@ class VolumeService {
   ) {
     this.deps = {
       volumeDAO: () => Promise.resolve(new DavVolumeDAO(env.DB)),
-      userDAO: () => Promise.resolve(new UserDAO(env.DB)),
       credentialDAO: () => Promise.resolve(new DavCredentialDAO(env.DB)),
+      identity: () => Promise.resolve(new UserIdentityService(env)),
       config: AppConfiguration.fromEnv(env),
       ...deps,
     };
@@ -47,8 +51,8 @@ class VolumeService {
 
   private static assertValidOwner(owner: string): void {
     // The owner *is* a username, so it must satisfy the username rule. The
-    // previous owner-only regex allowed a trailing hyphen, which no username
-    // can have — that admitted bucket owners that could never resolve against
+    // previous owner-only regex allowed a trailing hyphen, which no username can
+    // have — that admitted bucket owners that could never resolve against
     // `/users/:username`.
     if (!isValidUsername(owner)) throw new BadRequestError('Invalid owner name');
   }
@@ -57,15 +61,22 @@ class VolumeService {
     if (!isValidVolumeName(name)) throw new BadRequestError('Invalid volume name');
   }
 
-  private async countOwnedVolumes(creatorEmail: string): Promise<number> {
+  /**
+   * Buckets owned by an account, for the quota check.
+   *
+   * Keyed on the stable account id, not the address: after migration 0004 a user
+   * who changed their address still owns the same buckets, and an email-keyed
+   * count would read as zero and let them exceed the limit.
+   */
+  private async countOwnedVolumes(account: ResolvedAccount): Promise<number> {
     const dao = await this.deps.volumeDAO();
     // Prefer COUNT(*) over listing rows (why: listing 1000 rows to count
     // wastes D1 reads and truncates above the limit). Fall back to list
     // length for fake-DB doubles without COUNT support.
     try {
-      return await dao.countByOwnerEmail(creatorEmail.toLowerCase());
+      return await dao.countByOwnerUserId(account.id);
     } catch {
-      const owned = await dao.listByOwnerEmail(creatorEmail.toLowerCase(), 1000).catch(() => []);
+      const owned = await dao.listByOwnerUserId(account.id, 1000).catch(() => []);
       return owned.length;
     }
   }
@@ -84,15 +95,30 @@ class VolumeService {
     return volume;
   }
 
-  private async requireCallerUsername(creatorEmail: string): Promise<string> {
-    // Fails CLOSED. This used to return `null` on any error and the caller
-    // skipped the ownership check when it was null — so a D1 blip, or a `users`
-    // row whose username bootstrap had not completed yet, let an authenticated
-    // caller create buckets in *any* user's namespace. A missing handle is now
-    // an error, not a bypass.
-    const userDao = await this.deps.userDAO();
-    const row = await userDao.getByEmail(creatorEmail);
-    const username = (row as { username?: string | null } | null)?.username;
+  /**
+   * The caller's account.
+   *
+   * Fails CLOSED. This used to return `null` on any error and the caller skipped
+   * the ownership check when it was null — so a D1 blip, or a `users` row whose
+   * username bootstrap had not completed yet, let an authenticated caller create
+   * buckets in *any* user's namespace. A missing account is now an error, not a
+   * bypass.
+   */
+  public async requireCallerAccount(email: string): Promise<ResolvedAccount> {
+    const account = await this.deps
+      .identity()
+      .then((identity) => identity.resolveAccount(email))
+      .catch(() => null);
+    if (!account) throw new NotFoundError('No account is provisioned for this address; sign in again to provision one');
+    return account;
+  }
+
+  /**
+   * The caller's own handle, which is the URL namespace every user-owned bucket
+   * lives in. Fails closed for the same reason as `requireCallerAccount`.
+   */
+  private static requireCallerUsername(account: ResolvedAccount): string {
+    const username = account.username;
     if (typeof username !== 'string' || username.length === 0) {
       throw new NotFoundError('No username is provisioned for this account; set one via PATCH /user/me/username');
     }
@@ -118,12 +144,13 @@ class VolumeService {
     // username (case-insensitive); there is no grandfathering path, because a
     // silent fallback is indistinguishable from a transient D1 failure and
     // read as "allow".
-    const callerUsername = await this.requireCallerUsername(input.creatorEmail);
+    const account = await this.requireCallerAccount(input.creatorEmail);
+    const callerUsername = VolumeService.requireCallerUsername(account);
     if (owner.toLowerCase() !== callerUsername) {
       throw new ForbiddenError('Only the bucket owner can create buckets for this user');
     }
     const dao = await this.deps.volumeDAO();
-    const ownedCount = await this.countOwnedVolumes(input.creatorEmail);
+    const ownedCount = await this.countOwnedVolumes(account);
     // Fail-open on outage: quota is soft, auth stays fail-closed.
     checkVolumeQuota(ownedCount, this.deps.config.getMaxVolumesPerUser());
     const existing = await dao.getByOwnerName(owner, name).catch(() => null);
@@ -132,7 +159,12 @@ class VolumeService {
     const id = UUIDUtil.getRandomUUID();
     await dao.create({
       id,
-      ownerEmail: input.creatorEmail.toLowerCase(),
+      // `owner_email` records the account's frozen anchor, once, at create time.
+      // It is never updated again — it is the `users(email)` foreign key target
+      // this column resolves against, so rewriting it would cascade the row
+      // away. `owner_userId` is what ownership is actually decided on.
+      ownerEmail: account.anchorEmail,
+      ownerUserId: account.id,
       owner,
       name,
       description: input.description ?? null,
@@ -145,15 +177,10 @@ class VolumeService {
     return created;
   }
 
-  public async updateVolume(
-    owner: string,
-    name: string,
-    callerEmail: string,
-    patch: VolumePatch,
-  ): Promise<DavVolumeRow> {
+  public async updateVolume(owner: string, name: string, viewer: ViewerIdentity, patch: VolumePatch): Promise<DavVolumeRow> {
     validateVolumePatch(patch);
     const volume = await this.requireVolume(owner, name);
-    if (volume.owner_email.toLowerCase() !== callerEmail.toLowerCase()) {
+    if (!isVolumeOwner(viewer, volume)) {
       throw new ForbiddenError('Only the bucket owner can update this bucket');
     }
     if (patch.description === undefined && patch.isPrivate === undefined && patch.hrefPrefixMode === undefined) {

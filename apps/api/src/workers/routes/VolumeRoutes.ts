@@ -1,4 +1,5 @@
 import { Tokens } from '@durable-dav/backend-services/composition';
+import type { DavVolumeRow } from '@durable-dav/backend-data/dao';
 import type { VolumePatch } from '@durable-dav/backend-services/dav';
 import { readDavHrefPrefixMode } from '@durable-dav/shared/constants';
 import type { DavHrefPrefixMode } from '@durable-dav/shared/constants';
@@ -46,17 +47,18 @@ function toVolumeJson(r: { owner: string; name: string; description: string | nu
  * `cacheControlFor('meta')` arguments were unreachable intent.
  */
 async function handleListVolumes(c: ApiContext): Promise<Response> {
-  const email = requireUser(c);
-  if (email instanceof Response) return email;
+  const identity = requireUser(c);
+  if (identity instanceof Response) return identity;
+  const { email, userId } = identity;
   const scope = BaseRoute.getScope(c);
-  await scope
-    .get(Tokens.UserService)
-    .upsertUser(email)
-    .catch(() => undefined);
-
+  // The list is the caller's own buckets, so it is keyed on the account id
+  // rather than the sign-in address: an address-keyed cache entry is orphaned
+  // the moment the user changes address, and the old entry would keep being
+  // served under a key nothing can invalidate any more.
   const cache = scope.get(Tokens.KvCache);
+  const cacheKey = userId ?? email;
   try {
-    const cached = await getCachedVolumeList<VolumeJson[]>(cache, email);
+    const cached = await getCachedVolumeList<VolumeJson[]>(cache, cacheKey);
     if (cached) return c.json({ volumes: cached });
   } catch {
     // Fail-soft: fall through to D1.
@@ -64,11 +66,30 @@ async function handleListVolumes(c: ApiContext): Promise<Response> {
   // No `.catch(() => [])`: a D1 failure was indistinguishable from "you own
   // nothing", and the empty result was then written to KV for 60s — so a
   // one-second blip made a user's volume list look empty for a minute.
-  const dao = await scope.get(Tokens.DavVolumeDAO)();
-  const rows = await dao.listByOwnerEmail(email, 100);
+  const rows = await listOwnedVolumes(scope, userId, email);
   const volumes = rows.map(toVolumeJson);
-  await putCachedVolumeList(cache, email, volumes);
+  await putCachedVolumeList(cache, cacheKey, volumes);
   return c.json({ volumes });
+}
+
+/**
+ * The caller's buckets, preferring the account key.
+ *
+ * The address fallback is for a pre-0004 database (`users.id` absent) and for
+ * fake-DB doubles in tests that do not implement the id-keyed query. It is
+ * tried only after the id path has failed, so a real id-keyed read is never
+ * masked by it.
+ */
+async function listOwnedVolumes(scope: ReturnType<typeof BaseRoute.getScope>, userId: string | null, email: string): Promise<DavVolumeRow[]> {
+  const dao = await scope.get(Tokens.DavVolumeDAO)();
+  if (userId) {
+    try {
+      return await dao.listByOwnerUserId(userId, 100);
+    } catch {
+      // Fall through to the address path.
+    }
+  }
+  return dao.listByOwnerEmail(email, 100);
 }
 
 class VolumeDetail extends VolumeScopedRoute {
@@ -87,7 +108,7 @@ class VolumeDetail extends VolumeScopedRoute {
 }
 
 class UpdateVolume extends VolumeScopedRoute {
-  protected async run(c: ApiContext, { scope, email, row }: VolumeRequestContext): Promise<Response> {
+  protected async run(c: ApiContext, { scope, email, userId, viewer, row }: VolumeRequestContext): Promise<Response> {
     const { malformed, oversized, body } = await BaseRoute.readJson<VolumePatch>(c);
     if (oversized) return c.json({ Exception: { Type: 'PayloadTooLarge', Message: 'Payload too large' } }, 413);
     if (malformed) return c.json({ Exception: { Type: 'BadRequest', Message: 'Invalid JSON body' } }, 400);
@@ -98,9 +119,9 @@ class UpdateVolume extends VolumeScopedRoute {
     // enum check and answers 400 — the route has no second copy of the rule to
     // drift from.
     if ('hrefPrefixMode' in body) patch.hrefPrefixMode = body.hrefPrefixMode;
-    const updated = await scope.get(Tokens.VolumeService).updateVolume(row.owner, row.name, email, patch);
+    const updated = await scope.get(Tokens.VolumeService).updateVolume(row.owner, row.name, viewer, patch);
     const cache = scope.get(Tokens.KvCache);
-    await invalidateVolumeListCache(cache, email);
+    await invalidateVolumeListCache(cache, userId ?? email);
     // Cached PROPFIND bodies are keyed on volume+path+depth+request-body, with
     // no term for the href mode — so a mode flip would keep serving 207s in the
     // old shape for the rest of their TTL. Purging on change is what makes the
@@ -114,7 +135,7 @@ class UpdateVolume extends VolumeScopedRoute {
 }
 
 class DeleteVolume extends VolumeScopedRoute {
-  protected async run(c: ApiContext, { scope, email, row }: VolumeRequestContext): Promise<Response> {
+  protected async run(c: ApiContext, { scope, email, userId, row }: VolumeRequestContext): Promise<Response> {
     // The D1 delete is the authoritative step. It must NOT be swallowed:
     // swallowing it let the route destroy the DO filesystem and answer
     // `{"ok":true}` while the D1 row (and therefore the whole WebDAV surface)
@@ -135,20 +156,17 @@ class DeleteVolume extends VolumeScopedRoute {
       });
     }
     const cache = scope.get(Tokens.KvCache);
-    await invalidateVolumeListCache(cache, email);
+    await invalidateVolumeListCache(cache, userId ?? email);
     await invalidateVolumeCaches(cache, row.owner, row.name);
     return c.json({ ok: true, doCleanupFailed });
   }
 }
 
 async function handleCreateVolume(c: ApiContext): Promise<Response> {
-  const email = requireUser(c);
-  if (email instanceof Response) return email;
+  const identity = requireUser(c);
+  if (identity instanceof Response) return identity;
+  const { email, userId } = identity;
   const scope = BaseRoute.getScope(c);
-  await scope
-    .get(Tokens.UserService)
-    .upsertUser(email)
-    .catch(() => undefined);
   const { malformed, oversized, body } = await BaseRoute.readJson<{
     owner?: string;
     name?: string;
@@ -171,7 +189,7 @@ async function handleCreateVolume(c: ApiContext): Promise<Response> {
     hrefPrefixMode: body.hrefPrefixMode,
     creatorEmail: email,
   });
-  await invalidateVolumeListCache(scope.get(Tokens.KvCache), email);
+  await invalidateVolumeListCache(scope.get(Tokens.KvCache), userId ?? email);
   return c.json(toVolumeJson(created), 201);
 }
 

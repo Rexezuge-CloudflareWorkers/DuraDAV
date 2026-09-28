@@ -55,18 +55,18 @@ describe('DavLockGuard fails closed on lookup errors', () => {
 });
 
 describe('VolumeService.createVolume owner check fails closed', () => {
-  const service = (userDAO: unknown) =>
+  const service = (resolveAccount: () => Promise<unknown>) =>
     new VolumeService(
       { DB: {} as never },
       {
         volumeDAO: () =>
           Promise.resolve({
-            countByOwnerEmail: async () => 0,
+            countByOwnerUserId: async () => 0,
             getByOwnerName: async () => null,
             getById: async () => null,
             create: async () => undefined,
           } as never),
-        userDAO: () => Promise.resolve(userDAO as never),
+        identity: () => Promise.resolve({ resolveAccount } as never),
         credentialDAO: () => Promise.resolve({} as never),
       },
     );
@@ -74,23 +74,21 @@ describe('VolumeService.createVolume owner check fails closed', () => {
   it('rejects when the caller has no provisioned username', async () => {
     // Previously `resolveCallerUsername` returned null here and the check
     // `if (callerUsername && owner !== callerUsername)` was skipped entirely.
-    const svc = service({ getByEmail: async () => ({ username: null }) });
+    const svc = service(async () => ({ id: 'usr_a', email: 'a@x.co', anchorEmail: 'a@x.co', username: null }));
     await expect(svc.createVolume({ owner: 'victim', name: 'photos', creatorEmail: 'a@x.co' })).rejects.toThrow(
       /No username is provisioned/,
     );
   });
 
-  it('rejects when the user lookup throws', async () => {
-    const svc = service({
-      getByEmail: async () => {
-        throw new Error('D1 down');
-      },
+  it('rejects when the account lookup throws', async () => {
+    const svc = service(async () => {
+      throw new Error('D1 down');
     });
-    await expect(svc.createVolume({ owner: 'victim', name: 'photos', creatorEmail: 'a@x.co' })).rejects.toThrow(/D1 down/);
+    await expect(svc.createVolume({ owner: 'victim', name: 'photos', creatorEmail: 'a@x.co' })).rejects.toThrow(/No account is provisioned/);
   });
 
   it('rejects a mismatched owner', async () => {
-    const svc = service({ getByEmail: async () => ({ username: 'alice' }) });
+    const svc = service(async () => ({ id: 'usr_a', email: 'a@x.co', anchorEmail: 'a@x.co', username: 'alice' }));
     await expect(svc.createVolume({ owner: 'victim', name: 'photos', creatorEmail: 'a@x.co' })).rejects.toThrow(/Only the bucket owner/);
   });
 });
