@@ -90,6 +90,21 @@ describe('Tokens registry', () => {
       scope.get(Tokens.UserIdentityService),
     );
   });
+
+  it('hands VolumeService the very instance the container memoizes', async () => {
+    // The regression: `bindCoreServices` was passed a *factory*
+    // (`() => new UserIdentityService(...)`) rather than a resolver back into
+    // the container. The binding memoized correctly, so the assertion above
+    // still passed — but every `VolumeService` call allocated a fresh resolver,
+    // the memo never survived a call, and each request built two.
+    const scope = createRequestScope(makeEnv() as never);
+    const memoized = scope.get(Tokens.UserIdentityService);
+    const identityOf = (): (() => Promise<unknown>) =>
+      (scope.get(Tokens.VolumeService) as unknown as { deps: { identity: () => Promise<unknown> } }).deps.identity;
+    await expect(identityOf()()).resolves.toBe(memoized);
+    // The same object on a second call, not merely the same one as the binding.
+    await expect(identityOf()()).resolves.toBe(memoized);
+  });
 });
 
 describe('createRequestScope', () => {

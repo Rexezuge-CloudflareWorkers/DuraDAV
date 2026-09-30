@@ -64,16 +64,17 @@ function applyCors(response: Response, request: Request, siteUrl?: string | null
   if (requestOrigin === null) {
     // Same-origin or a non-browser client: nothing to negotiate.
     headers.delete('Access-Control-Allow-Origin');
-  } else {
-    // Echo the origin verbatim only when it is allow-listed; otherwise omit the
-    // header, which makes the browser block the read.
-    headers.set('Access-Control-Allow-Origin', allowed.includes(requestOrigin) ? requestOrigin : '');
-    if (!allowed.includes(requestOrigin)) {
-      headers.delete('Access-Control-Allow-Origin');
-    }
+  } else if (allowed.includes(requestOrigin)) {
+    // Echo the origin verbatim only when it is allow-listed.
+    headers.set('Access-Control-Allow-Origin', requestOrigin);
     // Required whenever the response varies by `Origin`, so a shared cache
     // cannot hand one origin's response to another.
     headers.set('Vary', 'Origin');
+  } else {
+    // Omit the header entirely, which is what makes the browser block the read.
+    // It was previously set to `''` and then deleted, so the allow-list check
+    // and the delete both had to be right for the request to be refused.
+    headers.delete('Access-Control-Allow-Origin');
   }
 
   headers.set('Access-Control-Allow-Methods', SUPPORT_METHODS.join(', '));
@@ -114,4 +115,4 @@ function davErrorResponse(status: number, condition?: string, headers: HeadersIn
   return new Response(body, { status, headers: responseHeaders });
 }
 
-export { DAV_CLASS, SUPPORT_METHODS, CORS_ALLOW_HEADERS, CORS_EXPOSE_HEADERS, applyCors, createdResponse, allowedOrigins, davErrorResponse };
+export { DAV_CLASS, SUPPORT_METHODS, applyCors, createdResponse, allowedOrigins, davErrorResponse };

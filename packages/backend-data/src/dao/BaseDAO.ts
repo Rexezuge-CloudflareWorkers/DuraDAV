@@ -26,24 +26,6 @@ abstract class BaseDAO {
     return BaseDAO.deleteOlderThan(this.database, table, timeColumn, cutoff, limit, idColumn);
   }
 
-  // Generic row lookup by primary key. Table/column identifiers are allow-listed
-  // to keep dynamic SQL safe; values always go through bindings.
-  protected static async findById<T>(db: D1Queryable, table: string, idColumn: string, idValue: string, columns = '*'): Promise<T | null> {
-    assertSqlIdentifier(table, 'table');
-    assertSqlIdentifier(idColumn, 'idColumn');
-    let selectColumns = '*';
-    if (columns !== '*') {
-      const validated: string[] = columns.split(',').map((column: string): string => {
-        const trimmed: string = column.trim();
-        assertSqlIdentifier(trimmed, 'column');
-        return trimmed;
-      });
-      selectColumns = validated.join(', ');
-    }
-    const row: T | null = await db.prepare(`SELECT ${selectColumns} FROM ${table} WHERE ${idColumn} = ? LIMIT 1`).bind(idValue).first<T>();
-    return row ?? null;
-  }
-
   // Generic batched delete of rows older than a cutoff. Mirrors the per-DAO
   // DELETE ... WHERE id IN (SELECT ... LIMIT ?) pattern with retry.
   protected static async deleteOlderThan(

@@ -6,8 +6,8 @@ import { isValidUsername, isValidVolumeName } from '@durable-dav/shared/constant
 import type { DavHrefPrefixMode } from '@durable-dav/shared/constants';
 import { TimestampUtil, UUIDUtil } from '@durable-dav/shared/utils';
 import { AppConfiguration } from '@durable-dav/backend-runtime/config';
-import { checkVolumeQuota, validateVolumePatch } from './VolumeCreatePolicy';
-import type { VolumePatch } from './VolumeCreatePolicy';
+import { checkVolumeQuota, parseVolumePatch } from './VolumeCreatePolicy';
+import type { VolumePatchInput } from './VolumeCreatePolicy';
 import { isVolumeOwner } from './volumeOwnership';
 import type { ViewerIdentity } from './volumeOwnership';
 import { UserIdentityService } from '../identity/UserIdentityService';
@@ -128,14 +128,23 @@ class VolumeService {
   public async createVolume(input: {
     owner: string;
     name: string;
-    description?: string | null;
-    isPrivate?: boolean;
+    // `unknown`, not `string | null | boolean`: these come straight off a parsed
+    // JSON body and `validateVolumePatch` is the runtime check that they are
+    // what they claim to be. Typing them narrowly here would make the guard
+    // unreachable from the compiler's point of view.
+    description?: unknown;
+    isPrivate?: unknown;
     hrefPrefixMode?: DavHrefPrefixMode;
     creatorEmail: string;
   }): Promise<DavVolumeRow> {
-    // Same validation as the PATCH path, so a bad mode is a 400 on create
-    // rather than a CHECK-constraint 500 from the INSERT.
-    validateVolumePatch({ hrefPrefixMode: input.hrefPrefixMode });
+    // Same validation as the PATCH path, and on *all three* fields rather than
+    // just the mode. Passing only `hrefPrefixMode` left `isPrivate` and
+    // `description` unvalidated on create: a body carrying `isPrivate: "false"`
+    // stored the string, and `Number("false")` is `NaN`, so the auth layer read
+    // the bucket as public and granted anonymous reads on a bucket the caller
+    // had asked to make private. The 500-char description cap was the same
+    // story — enforced on PATCH, absent on create.
+    const patch = parseVolumePatch({ description: input.description, isPrivate: input.isPrivate, hrefPrefixMode: input.hrefPrefixMode });
     const owner = VolumeService.normalizeOwner(input.owner);
     VolumeService.assertValidOwner(owner);
     const name = VolumeService.normalizeName(input.name);
@@ -167,8 +176,10 @@ class VolumeService {
       ownerUserId: account.id,
       owner,
       name,
-      description: input.description ?? null,
-      isPrivate: input.isPrivate ?? true,
+      // Validated above, so these carry the narrowed types. `?? true` is the
+      // private-by-default rule: an absent flag means private, never public.
+      description: patch.description ?? null,
+      isPrivate: patch.isPrivate ?? true,
       hrefPrefixMode: input.hrefPrefixMode,
       now,
     });
@@ -177,13 +188,22 @@ class VolumeService {
     return created;
   }
 
-  public async updateVolume(owner: string, name: string, viewer: ViewerIdentity, patch: VolumePatch): Promise<DavVolumeRow> {
-    validateVolumePatch(patch);
+  /**
+   * `patch` is the *unvalidated* body shape. Narrowing happens here, not at the
+   * route, so create and PATCH cannot disagree about the rules.
+   */
+  public async updateVolume(owner: string, name: string, viewer: ViewerIdentity, rawPatch: VolumePatchInput): Promise<DavVolumeRow> {
+    // Checked before the ownership guard so a malformed body is a 400 for the
+    // owner and a 400 for a stranger alike — the guard's answer must not depend
+    // on whether the body happened to be well-formed.
+    const patch = parseVolumePatch(rawPatch);
     const volume = await this.requireVolume(owner, name);
     if (!isVolumeOwner(viewer, volume)) {
       throw new ForbiddenError('Only the bucket owner can update this bucket');
     }
-    if (patch.description === undefined && patch.isPrivate === undefined && patch.hrefPrefixMode === undefined) {
+    // "Nothing to update" is about *presence*, not truthiness: an explicit
+    // `description: null` clears the field and must count.
+    if (rawPatch.description === undefined && rawPatch.isPrivate === undefined && rawPatch.hrefPrefixMode === undefined) {
       throw new BadRequestError('Nothing to update');
     }
     const now = TimestampUtil.getCurrentUnixTimestampInSeconds();
@@ -203,7 +223,8 @@ class VolumeService {
     const volume = await this.requireVolume(owner, name);
     // Best-effort credential cleanup. FK cascades cover D1, but explicit
     // deletes keep fake-DB tests honest.
-    await this.deps.credentialDAO().then((d) => d.deleteByVolume(volume.id).catch(() => undefined));
+    const credentialDAO = await this.deps.credentialDAO();
+    await credentialDAO.deleteByVolume(volume.id).catch(() => undefined);
     const dao = await this.deps.volumeDAO();
     await dao.deleteById(volume.id);
   }

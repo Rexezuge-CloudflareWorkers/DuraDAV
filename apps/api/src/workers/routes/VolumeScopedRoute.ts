@@ -130,7 +130,5 @@ async function withErrorMapping(c: ApiContext, run: () => Promise<Response>): Pr
   }
 }
 
-export { VolumeScopedRoute, requireUser, withErrorMapping,  };
+export { VolumeScopedRoute, requireUser, withErrorMapping };
 export type { NotOwnerStatus };
-
-export {MiddlewareHandlers} from '@/middleware/MiddlewareHandlers';

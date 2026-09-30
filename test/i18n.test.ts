@@ -1,13 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import {
-  BACKEND_STRINGS,
-  SUPPORTED_BACKEND_LOCALES,
-  canonicalizeBackendLocaleTag,
-  formatBackendString,
-  getBackendStrings,
-  normalizeBackendLocale,
-  resolveLocalizedStrings,
-} from '@durable-dav/shared/i18n';
+import { BACKEND_STRINGS, SUPPORTED_BACKEND_LOCALES, getBackendStrings, normalizeBackendLocale } from '@durable-dav/shared/i18n';
 
 // NOTE: `apps/web/src/i18n.ts` (+ `lib/locale.ts`) is not importable in this
 // node unit-test env — it pulls `i18next`/`react-i18next` (web-only deps, not
@@ -21,9 +13,9 @@ describe('backend strings (en)', () => {
   it('serves Title Case English strings', () => {
     const strings = getBackendStrings('en');
     expect(strings).toBe(BACKEND_STRINGS.en);
-    expect(strings.repo.notFound).toBe('Repository Not Found.');
-    expect(strings.token.limitReached).toContain('{max}');
-    expect(strings.git.pushRejected).toContain('{reason}');
+    expect(strings.common.unauthorized).toBe('Authentication Required.');
+    expect(strings.common.forbidden).toBe('Access Denied.');
+    expect(strings.common.internalError).toBe('Internal Server Error.');
   });
 
   it('keeps locale bundles structurally identical', () => {
@@ -35,33 +27,45 @@ describe('backend strings (en)', () => {
     }
   });
 
-  it('keeps {placeholder} parity across all locales', () => {
-    const varsOf = (value: string): string[] => [...new Set(value.match(/\{\w+\}/g))].sort();
-    const collect = (node: object, out: Map<string, string[]>): void => {
-      for (const [key, value] of Object.entries(node)) {
+  it('keeps every locale key set identical to en, all the way down', () => {
+    // The bundle is one nested `common` group today. This recurses so that
+    // adding a group cannot be shipped to some locales and not others without
+    // this failing — the failure mode that made the `repo`/`token`/`git`
+    // groups safe to delete in the first place was never caught.
+    const keyPath = (node: object, prefix = ''): string[] =>
+      Object.entries(node).flatMap(([key, value]) =>
+        value !== null && typeof value === 'object' ? keyPath(value as object, `${prefix}${key}.`) : [`${prefix}${key}`],
+      );
+    const expected = keyPath(BACKEND_STRINGS.en).sort();
+    expect(expected.length).toBeGreaterThan(0);
+    for (const locale of SUPPORTED_BACKEND_LOCALES) {
+      expect(keyPath(BACKEND_STRINGS[locale]).sort(), locale).toEqual(expected);
+    }
+  });
+
+  it('has no untranslated placeholders left to drift', () => {
+    // `formatBackendString` was removed along with its only data. If a message
+    // ever needs interpolation again it comes back with a real reader; until
+    // then a `{placeholder}` here would be silently printed to a client.
+    const collect = (node: object, out: string[]): void => {
+      for (const value of Object.values(node)) {
         if (value !== null && typeof value === 'object') collect(value as object, out);
-        else if (typeof value === 'string') out.set(key, varsOf(value));
+        else if (typeof value === 'string' && /\{\w+\}/.test(value)) out.push(value);
       }
     };
-    const enVars = new Map<string, string[]>();
-    collect(BACKEND_STRINGS.en, enVars);
     for (const locale of SUPPORTED_BACKEND_LOCALES) {
-      if (locale === 'en') continue;
-      const vars = new Map<string, string[]>();
-      collect(BACKEND_STRINGS[locale], vars);
-      for (const [key, expected] of enVars) {
-        expect(vars.get(key), `${locale}:${key}`).toEqual(expected);
-      }
+      const withPlaceholders: string[] = [];
+      collect(BACKEND_STRINGS[locale], withPlaceholders);
+      expect(withPlaceholders, locale).toEqual([]);
     }
   });
 });
 
 describe('backend strings (zh-CN)', () => {
-  it('serves Chinese strings with matching placeholders', () => {
+  it('serves Chinese strings', () => {
     const strings = getBackendStrings('zh-CN');
-    expect(strings.repo.notFound).toBe('仓库不存在。');
-    expect(strings.token.limitReached).toContain('{max}');
-    expect(strings.repo.created).toContain('{fullName}');
+    expect(strings.common.internalError).toBe('服务器内部错误。');
+    expect(strings.common.unauthorized).toBe('需要身份验证。');
   });
 });
 
@@ -90,31 +94,11 @@ describe('locale fallback', () => {
     expect(getBackendStrings('pt-BR')).toBe(BACKEND_STRINGS.pt);
   });
 
-  it('canonicalizes tags case- and separator-insensitively', () => {
-    expect(canonicalizeBackendLocaleTag('zh_cn')).toBe('zh-CN');
-    expect(canonicalizeBackendLocaleTag('ZH-CN')).toBe('zh-CN');
-    expect(canonicalizeBackendLocaleTag(' en ')).toBe('en');
+  it('normalizes tags case- and separator-insensitively', () => {
+    expect(normalizeBackendLocale('zh_cn')).toBe('zh-CN');
+    expect(normalizeBackendLocale('ZH-CN')).toBe('zh-CN');
+    expect(normalizeBackendLocale(' en ')).toBe('en');
     expect(normalizeBackendLocale('pt')).toBe('pt');
     expect(normalizeBackendLocale('xx')).toBe('en');
-  });
-
-  it('resolveLocalizedStrings prefers the primary locale, then the fallback', () => {
-    expect(resolveLocalizedStrings('zh-CN')).toBe(BACKEND_STRINGS['zh-CN']);
-    expect(resolveLocalizedStrings('xx', 'zh-CN')).toBe(BACKEND_STRINGS['zh-CN']);
-    expect(resolveLocalizedStrings('de', 'zh-CN')).toBe(BACKEND_STRINGS.de);
-    expect(resolveLocalizedStrings(null, null)).toBe(BACKEND_STRINGS.en);
-    expect(resolveLocalizedStrings('en')).toBe(BACKEND_STRINGS.en);
-  });
-});
-
-describe('formatBackendString', () => {
-  it('substitutes string and number placeholders', () => {
-    expect(formatBackendString('Repository {fullName} Created.', { fullName: 'alice/demo' })).toBe('Repository alice/demo Created.');
-    expect(formatBackendString('Maximum Of {max} Tokens Reached.', { max: 5 })).toBe('Maximum Of 5 Tokens Reached.');
-  });
-
-  it('leaves unknown placeholders untouched', () => {
-    expect(formatBackendString('Hello {name}.', {})).toBe('Hello {name}.');
-    expect(formatBackendString('No vars here.')).toBe('No vars here.');
   });
 });

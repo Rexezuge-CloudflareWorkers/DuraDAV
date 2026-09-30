@@ -126,7 +126,11 @@ class DurableDavWorker extends AbstractEntrypointWorker {
           }),
         )
         .then((res: Response) => {
-          if (!res.ok && res.status !== 202) console.error('CronTasksWorker error', res.status);
+          // `!res.ok` already excludes 2xx, so the old `&& res.status !== 202`
+          // guard was unreachable — and it would have suppressed the log for
+          // exactly the case that matters (a 202 is a normal single-flight
+          // skip, not an error).
+          if (!res.ok) console.error('CronTasksWorker error', res.status);
         })
         .catch((error: unknown) => console.error('Cron invoke failed', error)),
     );

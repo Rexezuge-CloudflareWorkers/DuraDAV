@@ -12,7 +12,6 @@ function node(key: string, isCollection: boolean, size = 0): DavNodeInfo {
     mtime: new Date('2026-01-02T03:04:05Z'),
     crtime: new Date('2026-01-01T00:00:00Z'),
     contentType: isCollection ? undefined : 'text/plain',
-    contentLanguage: undefined,
     displayname: key === '' ? undefined : (key.split('/').pop() ?? undefined),
     locks: [],
     deadProperties: [],

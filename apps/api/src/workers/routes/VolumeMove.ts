@@ -1,8 +1,13 @@
 import { getVolumeStub } from '../doStubs';
 
+/**
+ * One volume's move, addressed only by its old and new `/owner/volume` paths.
+ *
+ * The D1 row's `id` and `name` are deliberately absent: the Durable Object is
+ * resolved from the *path* (`getVolumeStub`), so carrying them here would be a
+ * second, unchecked source of the same identity.
+ */
 interface VolumeMoveItem {
-  id: string;
-  name: string;
   oldFull: string;
   newFull: string;
 }
@@ -24,14 +29,19 @@ async function moveOneVolume(env: Env, move: VolumeMoveItem): Promise<{ empty: b
   const entries = await source.listVolumeEntries();
   const target = getVolumeStub(env, newParts.owner, newParts.volume);
   try {
+    // Collections before files, and shallower before deeper within each, so a
+    // child is never written into a parent that does not exist yet.
     const ordered = [...entries].sort((a, b) => {
       if (a.isCollection !== b.isCollection) return a.isCollection ? -1 : 1;
       return a.path.length - b.path.length;
     });
     for (const entry of ordered) {
       if (!entry.path) continue;
+      // Hoisted out of the branch: both arms need it, and reading it twice made
+      // a future change to the two arms easy to get half-done.
+      const props = entry.props ?? [];
       if (entry.isCollection) {
-        await target.writeVolumeEntry({ path: entry.path, isCollection: true, props: entry.props ?? [] });
+        await target.writeVolumeEntry({ path: entry.path, isCollection: true, props });
       } else {
         const file = await source.readVolumeFile(entry.path);
         if (!file) throw new Error(`Failed to copy volume file ${entry.path}`);
@@ -41,11 +51,16 @@ async function moveOneVolume(env: Env, move: VolumeMoveItem): Promise<{ empty: b
           contentType: file.contentType ?? entry.contentType,
           etag: entry.etag,
           dataBase64: file.dataBase64,
-          props: entry.props ?? [],
+          props,
         });
       }
     }
-    await source.deleteVolume().catch(() => undefined);
+    // The source purge is inside the `try` on purpose. If it fails, the
+    // compensation below purges the *target* and the source is still intact —
+    // whereas treating a failed purge as success would leave the data in both
+    // isolates while the route rolled D1 back, which is the one outcome with no
+    // recovery path.
+    await source.deleteVolume();
     return { empty: entries.length === 0 };
   } catch (error) {
     await target.deleteVolume().catch(() => undefined);
@@ -58,7 +73,7 @@ async function moveOneVolume(env: Env, move: VolumeMoveItem): Promise<{ empty: b
 // the data still exists under the new name.
 async function moveOneVolumeBack(env: Env, move: VolumeMoveItem): Promise<boolean> {
   try {
-    await moveOneVolume(env, { id: move.id, name: move.name, oldFull: move.newFull, newFull: move.oldFull });
+    await moveOneVolume(env, { oldFull: move.newFull, newFull: move.oldFull });
     return true;
   } catch {
     return false;
@@ -91,5 +106,5 @@ async function moveVolumeDosForRename(env: Env, moves: VolumeMoveItem[]): Promis
   }
 }
 
-export { moveVolumeDosForRename, moveOneVolume, splitFull };
+export { moveVolumeDosForRename, splitFull };
 export type { VolumeMoveItem };

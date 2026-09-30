@@ -12,7 +12,6 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@durable-dav/backend-errors": "workspace:*",
     "@durable-dav/shared": "workspace:*",
     "@durable-dav/webdav": "workspace:*",
     "dofs": "^0.1.0"

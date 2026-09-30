@@ -102,6 +102,18 @@ const PBKDF2_ITERATIONS = 100_000;
 const PBKDF2_PREFIX = 'pbkdf2-sha256';
 const PBKDF2_KEY_BYTES = 32;
 
+/**
+ * Ceiling on the iteration count read back out of a stored hash.
+ *
+ * `isSafeInteger` is not a bound: `Number.MAX_SAFE_INTEGER` passes it, so a
+ * corrupt or hostile `dav_credentials` row could name a work factor that turns
+ * one unauthenticated Basic request into a derivation measured in years. The
+ * ceiling is generous enough that a future legitimate work-factor increase (even
+ * 100x) still verifies, while turning an absurd value into an ordinary
+ * authentication failure.
+ */
+const PBKDF2_MAX_ITERATIONS = 10_000_000;
+
 function base64Url(bytes: Uint8Array): string {
   let binary = '';
   for (const byte of bytes) binary += String.fromCodePoint(byte);
@@ -148,11 +160,12 @@ async function verifyPbkdf2(password: string, stored: string): Promise<boolean> 
   // `['pbkdf2-sha256', iterations, salt, hash]`
   if (parts.length !== 4) return false;
   const [, iterationText, saltText, hashText] = parts as [string, string, string, string];
-  // `isSafeInteger` rather than `isInteger`: a hostile row cannot smuggle in a
-  // huge work factor and turn one Basic-auth request into a CPU-exhaustion
-  // vector, and `1e300` is a safe "integer" but not a safe iteration count.
+  // Bounded on both ends: `isSafeInteger` rejects `1e300`, which is not even a
+  // safe integer, but *accepts* `Number.MAX_SAFE_INTEGER` — so the upper clamp
+  // is what actually stops a corrupt row from becoming a CPU-exhaustion vector
+  // on the unauthenticated hot path.
   const iterations = Number(iterationText);
-  if (!Number.isSafeInteger(iterations) || iterations <= 0) return false;
+  if (!Number.isSafeInteger(iterations) || iterations <= 0 || iterations > PBKDF2_MAX_ITERATIONS) return false;
   let salt: Uint8Array;
   let expected: Uint8Array;
   try {

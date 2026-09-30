@@ -6,6 +6,7 @@ import { getVolumeStub } from '../doStubs';
 import { invalidateVolumeCaches, invalidatesReadCache } from './DavReadCache';
 import { resolveDestination } from './davDestination';
 import { readPageParams, stripPageParams } from './davPageParams';
+import { applyDavForwardHeaders } from './davForwardHeaders';
 import { VolumeScopedRoute } from './VolumeScopedRoute';
 import type { VolumeRequestContext } from './VolumeScopedRoute';
 
@@ -62,36 +63,31 @@ class BrowserVolumeRoute extends VolumeScopedRoute {
     const hasBody = !['GET', 'HEAD', 'OPTIONS'].includes(method);
     const destination = resolveDestination(c.req.raw.headers.get('Destination'), c.req.url, davBase, hrefPrefixMode);
     if (c.req.raw.headers.has('Destination') && !destination.ok) {
-        // §10.3: a destination on another server cannot be satisfied. Any other
-        // unmappable destination is a plain 400, as on the DAV plane.
-        return destination.reason === 'cross-origin' ? c.json({ Exception: { Type: 'BadGateway', Message: 'Cross-origin Destination' } }, 502) : c.json({ Exception: { Type: 'BadRequest', Message: 'Invalid Destination' } }, 400);
-      }
+      // §10.3: a destination on another server cannot be satisfied. Any other
+      // unmappable destination is a plain 400, as on the DAV plane.
+      return destination.reason === 'cross-origin'
+        ? c.json({ Exception: { Type: 'BadGateway', Message: 'Cross-origin Destination' } }, 502)
+        : c.json({ Exception: { Type: 'BadRequest', Message: 'Invalid Destination' } }, 400);
+    }
     // Forward to the DAV-base URL (not the browser URL): the DO falls back to
     // pathname parsing when X-Dav-Path is empty (root), and the browser prefix
     // would resolve to a nonexistent inner path there.
     const forward = new Request(`${forwardUrl.origin}${davBase}/${inner}`, {
       method,
-      headers: (() => {
-        const h = new Headers(c.req.raw.headers);
-        h.set('X-Dav-Base', davBase);
-        h.set('X-Dav-Path', inner);
-        h.set('X-Dav-Href-Prefix-Mode', hrefPrefixMode);
-        h.set('X-Dav-User', email);
-        if (destination.ok) h.set('Destination', destination.destination);
-        // A caller-supplied `X-Dav-Page*` must not survive: paging is opt-in per
-        // request and this plane decides it from the query string, so a hand-set
-        // header could otherwise page a request that never asked to be paged.
-        h.delete('X-Dav-Page');
-        h.delete('X-Dav-Page-Limit');
-        if (pageParams !== null) {
-          if (pageParams.page !== null) h.set('X-Dav-Page', pageParams.page);
-          if (pageParams.limit !== null) h.set('X-Dav-Page-Limit', pageParams.limit);
-        }
-        // Never forward ambient Basic credentials into the DO on this plane;
-        // session identity is authoritative here.
-        h.delete('Authorization');
-        return h;
-      })(),
+      headers: applyDavForwardHeaders(c.req.raw.headers, {
+        base: davBase,
+        inner,
+        hrefPrefixMode,
+        // Session identity is authoritative on this plane, so the caller's
+        // resolved address is the owner — not whatever a Basic header claimed.
+        userEmail: email,
+        // Only COPY/MOVE act on a Destination, and only the canonical form.
+        destination: destination.ok ? destination.destination : undefined,
+        // Paging arrived as `?page=`/`?limit=` and is re-emitted here, because
+        // the DO's URL is rebuilt from the DAV base and it would never see the
+        // query string.
+        page: pageParams,
+      }),
       body: hasBody ? c.req.raw.body : undefined,
       ...(hasBody && { duplex: 'half' }),
     });

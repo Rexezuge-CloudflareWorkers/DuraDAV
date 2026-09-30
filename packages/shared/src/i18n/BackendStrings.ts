@@ -4,60 +4,35 @@ const SUPPORTED_BACKEND_LOCALES = ['en', 'de', 'fr', 'es', 'it', 'nl', 'pt', 'pl
 
 type SupportedBackendLocale = (typeof SUPPORTED_BACKEND_LOCALES)[number];
 
+/**
+ * The backend message bundle.
+ *
+ * Only `common` remains. It used to also carry `repo`, `token`, `issue`, `git`
+ * and `namespace` groups — 15 keys across 12 locales, ~60 translated strings,
+ * with **no production reader for any of them**. They are residue from a
+ * Git-hosting product this server is not, and the only thing that ever read
+ * them was a test asserting the formatter worked. Shipping them meant every
+ * locale had to be edited in lockstep for a feature that does not exist here;
+ * `validate_locales.mjs` would fail CI on a missing translation of a key no
+ * code path could emit.
+ *
+ * `formatBackendString` goes the same way: its only caller was that test. A
+ * message is either static or comes from a `ServiceError`, so there is nothing
+ * left to interpolate.
+ */
 interface CommonStrings {
   unauthorized: string;
   forbidden: string;
   internalError: string;
 }
 
-interface RepoStrings {
-  notFound: string;
-  visibilityDenied: string;
-  created: string;
-  deleted: string;
-}
-
-interface TokenStrings {
-  created: string;
-  revoked: string;
-  limitReached: string;
-}
-
-interface IssueStrings {
-  created: string;
-}
-
-interface GitStrings {
-  pushRejected: string;
-}
-
-interface NamespaceStrings {
-  reserved: string;
-}
-
 interface BackendLocaleStrings {
   common: CommonStrings;
-  repo: RepoStrings;
-  token: TokenStrings;
-  issue: IssueStrings;
-  git: GitStrings;
-  namespace: NamespaceStrings;
-}
-
-function formatBackendString(template: string, vars: Record<string, string | number> = {}): string {
-  return template.replaceAll(/\{(\w+)\}/g, (match: string, key: string): string => {
-    const value: unknown = vars[key];
-    return typeof value === 'string' || typeof value === 'number' ? String(value) : match;
-  });
-}
-
-function canonicalizeBackendLocaleTag(tag: string): string {
-  return canonicalizeLanguageTag(tag);
 }
 
 function normalizeBackendLocale(locale: string | null | undefined): SupportedBackendLocale {
-  if (!locale || typeof locale !== 'string') return 'en';
-  const canonical = canonicalizeBackendLocaleTag(locale);
+  if (!locale) return 'en';
+  const canonical = canonicalizeLanguageTag(locale);
   if ((SUPPORTED_BACKEND_LOCALES as readonly string[]).includes(canonical)) {
     return canonical as SupportedBackendLocale;
   }
@@ -67,14 +42,5 @@ function normalizeBackendLocale(locale: string | null | undefined): SupportedBac
   return (match || 'en') as SupportedBackendLocale;
 }
 
-export type {
-  BackendLocaleStrings,
-  CommonStrings,
-  RepoStrings,
-  TokenStrings,
-  IssueStrings,
-  GitStrings,
-  NamespaceStrings,
-  SupportedBackendLocale,
-};
-export { SUPPORTED_BACKEND_LOCALES, canonicalizeBackendLocaleTag, formatBackendString, normalizeBackendLocale };
+export type { BackendLocaleStrings, CommonStrings, SupportedBackendLocale };
+export { SUPPORTED_BACKEND_LOCALES, normalizeBackendLocale };

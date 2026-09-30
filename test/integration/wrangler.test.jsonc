@@ -11,6 +11,11 @@
   },
   "migrations": [{ "tag": "v1000000000", "new_sqlite_classes": ["DavVolumeWorker", "CronTasksWorker"] }],
   "d1_databases": [{ "binding": "DB", "database_name": "durable-dav-test-db", "database_id": "00000000-0000-0000-0000-000000000000" }],
+  // Without this the KV read cache is inert in integration tests — `KvCache`
+  // reports `available: false` and every read falls through to the DO — so
+  // cache-key and cache-poisoning bugs are invisible to this suite entirely.
+  // `vitest-pool-workers` provides a local KV implementation for the namespace.
+  "kv_namespaces": [{ "binding": "CACHE", "id": "00000000000000000000000000000000" }],
   "vars": {
     "ENVIRONMENT": "development",
     "DEV_AUTH_EMAIL": "test@example.com",

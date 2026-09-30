@@ -1,9 +1,11 @@
 import type { KvCache } from '@durable-dav/backend-runtime/kv';
 import type { ApiContext } from '@/types/ApiContext';
 import type { DavAuthResult } from '@/middleware/DavAuth';
+import { applyDavForwardHeaders } from './davForwardHeaders';
 import {
   MAX_CACHED_FILE_BYTES,
   base64ToBytes,
+  bytesToBase64,
   cacheControlFor,
   etagForPropfind,
   getCachedFile,
@@ -29,11 +31,56 @@ type DavContext = ApiContext;
  */
 
 /**
+ * Coerce a raw KV value into a `propfind` cache entry, or `null` if it is not
+ * one.
+ *
+ * A miss is the correct answer to anything unrecognised. The `?? ''` shape this
+ * replaces served `200 Content-Length: 0` for a file the client can see in a
+ * listing, and an *empty* multistatus for a collection — which reads as "this
+ * folder is empty" rather than as the cache miss it is. An entry is only
+ * usable if the field it is keyed on is present and a string; the optional ones
+ * degrade to their defaults.
+ */
+function asPropfindEntry(raw: unknown): { etag: string; body: string } | null {
+  if (typeof raw !== 'object' || raw === null) return null;
+  const entry = raw as { etag?: unknown; body?: unknown };
+  return typeof entry.etag !== 'string' || entry.etag === '' || (typeof entry.body !== 'string') ? null : { etag: entry.etag, body: entry.body };
+}
+
+/**
+ * `file` counterpart of {@link asPropfindEntry}.
+ *
+ * `b64` is validated by round-tripping rather than by shape: an entry whose
+ * base64 does not decode is unusable, and `atob` throwing here turns a bad
+ * entry into a miss instead of a 500.
+ */
+function asFileEntry(raw: unknown): { etag: string; contentType?: string | null; b64: string } | null {
+  if (typeof raw !== 'object' || raw === null) return null;
+  const entry = raw as { etag?: unknown; contentType?: unknown; b64?: unknown };
+  if (typeof entry.etag !== 'string' || entry.etag === '' || (typeof entry.b64 !== 'string')) return null;
+  let bytes: Uint8Array;
+  try {
+    bytes = base64ToBytes(entry.b64);
+  } catch {
+    // Not decodable base64. Treated as a miss rather than letting `atob`'s
+    // throw escape as a 500 on the read path.
+    return null;
+  }
+  return {
+    etag: entry.etag,
+    contentType: typeof entry.contentType === 'string' ? entry.contentType : null,
+    // Re-encoded so the decoded and stored forms cannot disagree, and so the
+    // caller never holds both at once.
+    b64: bytesToBase64(bytes),
+  };
+}
+
+/**
 200 or 304 built from a cache hit.
 */
 function respondFromCache(
   kind: 'file' | 'propfind',
-  entry: { etag: string; contentType?: string | null; body?: string; b64?: string },
+  entry: { etag: string; contentType?: string | null; body: string } | { etag: string; contentType?: string | null; b64: string },
   request: Request,
   headOnly: boolean,
 ): Response {
@@ -43,7 +90,8 @@ function respondFromCache(
     return new Response(null, { status: 304, headers: { ETag: entry.etag, 'Cache-Control': cacheControlFor(kind) } });
   }
   if (kind === 'propfind') {
-    return new Response(entry.body ?? '', {
+    const body = 'body' in entry ? entry.body : '';
+    return new Response(body, {
       status: 207,
       headers: {
         'Content-Type': 'application/xml; charset=utf-8',
@@ -52,7 +100,8 @@ function respondFromCache(
       },
     });
   }
-  const bytes = base64ToBytes(entry.b64 ?? '');
+  const b64 = 'b64' in entry ? entry.b64 : '';
+  const bytes = base64ToBytes(b64);
   return new Response(headOnly ? null : (bytes as BodyInit), {
     status: 200,
     headers: {
@@ -118,7 +167,7 @@ async function serveGet(args: ServeReadArgs): Promise<Response> {
   const hasRange = c.req.raw.headers.has('Range');
   if (!hasRange) {
     try {
-      const cached = await getCachedFile(cache, auth.owner, auth.volume, inner);
+      const cached = asFileEntry(await getCachedFile(cache, auth.owner, auth.volume, inner));
       if (cached) return respondFromCache('file', cached, c.req.raw, headOnly);
     } catch {
       // Fail-soft: fall through to the DO loader.
@@ -159,7 +208,7 @@ async function servePropfind(args: Omit<ServeReadArgs, 'headOnly'>): Promise<Res
   const bodyText = new TextDecoder().decode(bodyBytes);
   if (cacheable) {
     try {
-      const cached = await getCachedPropfind(cache, auth.owner, auth.volume, inner, depth, bodyText);
+      const cached = asPropfindEntry(await getCachedPropfind(cache, auth.owner, auth.volume, inner, depth, bodyText));
       if (cached) return respondFromCache('propfind', cached, c.req.raw, false);
     } catch {
       // Fail-soft: fall through to the DO loader.
@@ -190,27 +239,18 @@ async function servePropfind(args: Omit<ServeReadArgs, 'headOnly'>): Promise<Res
  * would make a `root`-mode bucket unable to resolve its own request URL.
  */
 function davHeaders(c: DavContext, auth: DavAuthResult, base: string, inner: string): Headers {
-  const h = new Headers(c.req.raw.headers);
-  h.set('X-Dav-Base', base);
-  h.set('X-Dav-Path', inner);
-  // Always overwrite, like `X-Dav-User` below: a client-supplied
-  // `X-Dav-Href-Prefix-Mode: root` would otherwise reach the DO untouched and
-  // silently change the addressing shape of a bucket whose owner chose `base`.
-  h.set('X-Dav-Href-Prefix-Mode', auth.hrefPrefixMode);
-  // Always overwrite. Setting it only when authenticated let a client-supplied
-  // `X-Dav-User: admin@…` through untouched on an anonymous read of a public
-  // volume. Nothing consumes it today, but it is a header-injection primitive
-  // one refactor away from mattering.
-  //
-  // The value is the owner's *current* sign-in address (resolved from
-  // `owner_user_id` in `DavAuth`), not the frozen `owner_email` anchor, so the
-  // DO never records an address the owner does not actually use. It is still
-  // attacker-controllable in the sense that any bucket credential holder can
-  // reach the owner of that bucket — which is the credential's entire purpose.
-  h.set('X-Dav-User', auth.userEmail ?? '');
-  // The DO never reads Authorization; do not hand credentials down.
-  h.delete('Authorization');
-  return h;
+  return applyDavForwardHeaders(c.req.raw.headers, {
+    base,
+    inner,
+    hrefPrefixMode: auth.hrefPrefixMode,
+    userEmail: auth.userEmail,
+    // The WebDAV plane never pages: RFC 4918 §9.1 has no paging concept, so a
+    // paged 207 here would be a truncated multistatus to a native client.
+  });
 }
 
-export { serveGet, servePropfind, davHeaders };
+// `asPropfindEntry`/`asFileEntry` are exported for direct unit testing: they are
+// the fail-closed boundary between "whatever is in KV" and "what we serve", and
+// a bug there is a wrong body rather than an exception, which no other test in
+// the suite would notice.
+export { serveGet, servePropfind, davHeaders, asPropfindEntry, asFileEntry };

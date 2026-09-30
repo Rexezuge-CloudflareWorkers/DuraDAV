@@ -148,7 +148,4 @@ function resolveDestination(header: string | null, requestUrl: string, pathBase:
   return { ok: true, destination: `${origin}${pathBase}${inner === '' ? '/' : `/${inner}`}` };
 }
 
-export { resolveDestination, hasDotSegment, browserInnerFrom, innerFromPathname, rawPathOf };
-
-
-export {stripSlashes} from '@durable-dav/webdav';
+export { resolveDestination };

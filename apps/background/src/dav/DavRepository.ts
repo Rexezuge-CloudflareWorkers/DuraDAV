@@ -132,7 +132,11 @@ class DavRepository {
       mtime,
       crtime,
       contentType: meta.contentType,
-      contentLanguage: undefined,
+      // No `contentLanguage`: nothing ever stored one, so the field was
+      // permanently `undefined` and `getcontentlanguage` was absent from every
+      // PROPFIND while the schema claimed otherwise. Deriving the display name
+      // from the path is deliberate — the dropped `dav_nodes.displayname`
+      // column was never written.
       displayname: innerPath === '' ? undefined : (innerPath.split('/').pop() ?? undefined),
       locks,
       deadProperties: getDeadProperties(this.sql, innerPath),
@@ -149,7 +153,6 @@ class DavRepository {
       mtime: now,
       crtime: now,
       contentType: undefined,
-      contentLanguage: undefined,
       displayname: undefined,
       locks: [],
       deadProperties: [],

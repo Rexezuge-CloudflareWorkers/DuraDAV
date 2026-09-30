@@ -32,26 +32,33 @@ function renderDavProperty(propName: string, value: string): string {
   return `<${propName}>${content}</${propName}>`;
 }
 
-function renderPropertyElement(property: DeadProperty): string {
-  const qualifiedName = property.prefix ? `${property.prefix}:${property.localName}` : property.localName;
-  const namespaceDeclaration =
+/**
+ * `prefix:local` plus the `xmlns` declaration that makes it resolve.
+ *
+ * The two renderers below differ only in whether the element has content, and
+ * they used to duplicate this whole derivation — including the escaping of the
+ * namespace URI, which is the part that must never be wrong on a
+ * client-controlled value.
+ */
+function qualifyProperty(property: DeadProperty): { name: string; declaration: string } {
+  const name = property.prefix ? `${property.prefix}:${property.localName}` : property.localName;
+  const declaration =
     property.namespaceURI === ''
       ? ' xmlns=""'
       : property.prefix
         ? ` xmlns:${property.prefix}="${escapeXml(property.namespaceURI)}"`
         : ` xmlns="${escapeXml(property.namespaceURI)}"`;
-  return `<${qualifiedName}${namespaceDeclaration}>${property.valueXml}</${qualifiedName}>`;
+  return { name, declaration };
+}
+
+function renderPropertyElement(property: DeadProperty): string {
+  const { name, declaration } = qualifyProperty(property);
+  return `<${name}${declaration}>${property.valueXml}</${name}>`;
 }
 
 function renderEmptyPropertyElement(property: DeadProperty): string {
-  const qualifiedName = property.prefix ? `${property.prefix}:${property.localName}` : property.localName;
-  const namespaceDeclaration =
-    property.namespaceURI === ''
-      ? ' xmlns=""'
-      : property.prefix
-        ? ` xmlns:${property.prefix}="${escapeXml(property.namespaceURI)}"`
-        : ` xmlns="${escapeXml(property.namespaceURI)}"`;
-  return `<${qualifiedName}${namespaceDeclaration} />`;
+  const { name, declaration } = qualifyProperty(property);
+  return `<${name}${declaration} />`;
 }
 
 function renderPropstat(status: string, properties: string[]): string {

@@ -4,23 +4,11 @@ class CryptoUtility {
     return this.toHex(new Uint8Array(digest));
   }
 
-  public static async hmacSha256Hex(value: string, secret: string): Promise<string> {
-    const key: CryptoKey = await crypto.subtle.importKey(
-      'raw',
-      new TextEncoder().encode(secret),
-      { name: 'HMAC', hash: 'SHA-256' },
-      false,
-      ['sign'],
-    );
-    const signature: ArrayBuffer = await crypto.subtle.sign('HMAC', key, new TextEncoder().encode(value));
-    return this.toHex(new Uint8Array(signature));
-  }
-
   private static toHex(bytes: Uint8Array): string {
     return Array.from(bytes, (byte: number): string => byte.toString(16).padStart(2, '0')).join('');
   }
 
-  public static toBase64Url(bytes: Uint8Array): string {
+  private static toBase64Url(bytes: Uint8Array): string {
     let binary = '';
     bytes.forEach((byte: number): void => {
       binary += String.fromCodePoint(byte);

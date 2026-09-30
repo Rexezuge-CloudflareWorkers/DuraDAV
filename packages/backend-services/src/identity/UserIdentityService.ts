@@ -3,7 +3,7 @@ import type { D1Queryable } from '@durable-dav/backend-data/utils';
 import { BadRequestError, DatabaseError } from '@durable-dav/backend-errors';
 import { isValidEmailFormat } from '@durable-dav/shared/utils';
 import { TimestampUtil } from '@durable-dav/shared/utils';
-import { resolveAccount } from '../user/accountLookup';
+import { resolveAccount, summarize } from '../user/accountLookup';
 import type { AccountLookupDeps, ResolvedAccount } from '../user/accountLookup';
 
 interface UserIdentityEnv {
@@ -70,15 +70,13 @@ class UserIdentityService {
    * already holds one (a volume owner) and needs the current address.
    */
   public async resolveUserById(userId: string): Promise<ResolvedAccount | null> {
-    const row = await this.deps
-      .userDAO()
-      .then((dao) => dao.getById(userId))
-      .catch((error: unknown) => {
-        throw error instanceof DatabaseError
-          ? error
-          : new DatabaseError(`Failed to resolve account: ${error instanceof Error ? error.message : String(error)}`);
-      });
-    return row?.id ? { id: row.id, email: (row.current_email ?? row.email).toLowerCase(), anchorEmail: row.email, username: row.username ?? null } : null;
+    const userDAO = await this.deps.userDAO();
+    const row = await userDAO.getById(userId).catch((error: unknown) => {
+      throw error instanceof DatabaseError
+        ? error
+        : new DatabaseError(`Failed to resolve account: ${error instanceof Error ? error.message : String(error)}`);
+    });
+    return summarize(row);
   }
 
   private async load(email: string): Promise<ResolvedAccount | null> {
@@ -93,7 +91,8 @@ class UserIdentityService {
    * Every address known for an account, verified ones first.
    */
   public async listAddresses(userId: string): Promise<Array<{ email: string; isVerified: boolean }>> {
-    const rows = await this.deps.userEmailDAO().then((dao) => dao.listByUserId(userId));
+    const emailDAO = await this.deps.userEmailDAO();
+    const rows = await emailDAO.listByUserId(userId);
     return rows.map((row) => ({ email: row.email, isVerified: row.is_verified === 1 }));
   }
 
@@ -147,7 +146,8 @@ class UserIdentityService {
   public async linkVerifiedEmail(userId: string, email: string, now = TimestampUtil.getCurrentUnixTimestampInSeconds()): Promise<void> {
     const address = email.trim().toLowerCase();
     if (!isValidEmailFormat(address)) throw new BadRequestError('Invalid email address');
-    const outcome = await this.deps.userEmailDAO().then((dao) => dao.register({ email: address, userId, isVerified: true, now }));
+    const emailDAO = await this.deps.userEmailDAO();
+    const outcome = await emailDAO.register({ email: address, userId, isVerified: true, now });
     if (outcome === 'already-claimed') throw new BadRequestError('Email is already in use');
   }
 }

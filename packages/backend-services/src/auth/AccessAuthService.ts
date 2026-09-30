@@ -9,6 +9,7 @@ interface AccessAuthEnv {
   POLICY_AUD?: string;
   DEV_AUTH_EMAIL?: string;
   DEMO_MODE?: string;
+  DEMO_USER_EMAIL?: string;
   ENVIRONMENT?: string;
 }
 
@@ -20,22 +21,27 @@ interface AccessIdentityContext {
 
 type AccessAuthStrategy = (env: AccessAuthEnv, request: Request, accessCtx?: AccessIdentityContext) => Promise<string | null>;
 
-function isBypassAllowed(env: AccessAuthEnv): boolean {
-  return AppConfiguration.fromEnv(env).isBypassAllowed();
-}
-
-function demoModeStrategy(env: AccessAuthEnv): Promise<string | null> {
-  if (!isBypassAllowed(env)) return Promise.resolve(null);
-  return Promise.resolve(AppConfiguration.fromEnv(env).isDemoMode() ? DEMO_USER_EMAIL : null);
-}
-
 function isValidAuthEmail(raw: string): boolean {
   return raw !== '' && !/\s/.test(raw) && isValidEmailFormat(raw);
 }
 
+function demoModeStrategy(env: AccessAuthEnv): Promise<string | null> {
+  const config = AppConfiguration.fromEnv(env);
+  if (!config.isBypassAllowed() || !config.isDemoMode()) return Promise.resolve(null);
+  // `DEMO_USER_EMAIL` wins over the constant. It used to be ignored entirely,
+  // so an operator who set it for a staging deploy silently authenticated every
+  // request as `demo@example.com` and had no way to tell from the config that
+  // the variable was inert. A malformed override falls back to the constant
+  // rather than being trusted, matching `devEmailStrategy`.
+  const configured = config.getDemoUserEmail()?.trim() ?? '';
+  if (configured) return Promise.resolve(isValidAuthEmail(configured) ? configured.toLowerCase() : DEMO_USER_EMAIL);
+  return Promise.resolve(DEMO_USER_EMAIL);
+}
+
 function devEmailStrategy(env: AccessAuthEnv): Promise<string | null> {
-  if (!isBypassAllowed(env)) return Promise.resolve(null);
-  const raw = env.DEV_AUTH_EMAIL?.trim() ?? '';
+  const config = AppConfiguration.fromEnv(env);
+  if (!config.isBypassAllowed()) return Promise.resolve(null);
+  const raw = config.getDevAuthEmail()?.trim() ?? '';
   if (!raw) return Promise.resolve(null);
   // Fail closed on malformed bypass emails — fall through to JWT instead of
   // authenticating an invalid identity.
@@ -43,12 +49,18 @@ function devEmailStrategy(env: AccessAuthEnv): Promise<string | null> {
 }
 
 async function accessJwtStrategy(env: AccessAuthEnv, request: Request): Promise<string | null> {
-  if (env.TEAM_DOMAIN && env.POLICY_AUD) {
+  // Read through config, not off `env` directly: the empty-string-means-unset
+  // rule and the trimming live in `AuthConfig`, and a caller that read the raw
+  // var would have to re-implement both.
+  const config = AppConfiguration.fromEnv(env);
+  const teamDomain = config.getTeamDomain();
+  const policyAud = config.getPolicyAud();
+  if (teamDomain && policyAud) {
     // Fail soft so the `ctx.access` fallback stays reachable when the JWT is
     // missing/invalid. `getAuthenticatedUserEmail` throws once no strategy
     // matches — a single throw site instead of one per strategy.
     try {
-      return await AccessAuthService.verifyAccessJwt(request, env.TEAM_DOMAIN, env.POLICY_AUD);
+      return await AccessAuthService.verifyAccessJwt(request, teamDomain, policyAud);
     } catch {
       return null;
     }

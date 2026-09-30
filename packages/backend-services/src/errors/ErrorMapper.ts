@@ -16,6 +16,16 @@ function buildBody(error: ServiceError): ErrorResponse {
   return { Exception: { Type: error.getErrorType(), Message: error.getErrorMessage() } };
 }
 
+/**
+ * The statuses the JSON API will pass through verbatim.
+ *
+ * Module scope, not a `new Set` inside `toServiceStatus`: that was allocating a
+ * fresh set on every error, on a path that runs whenever a request fails.
+ */
+const KNOWN_STATUSES: ReadonlySet<number> = new Set([400, 401, 403, 404, 409, 413, 429]);
+
+type ServiceStatus = 400 | 401 | 403 | 404 | 409 | 413 | 429 | 500;
+
 function mapServiceError(error: unknown, locale?: string | null): MappedError {
   if (error instanceof ServiceError) {
     return { status: error.getErrorCode(), body: buildBody(error) };
@@ -32,12 +42,11 @@ function mapServiceError(error: unknown, locale?: string | null): MappedError {
   };
 }
 
-function toServiceStatus(error: unknown): 400 | 401 | 403 | 404 | 409 | 413 | 429 | 500 {
+function toServiceStatus(error: unknown): ServiceStatus {
   const mapped = mapServiceError(error);
   // Registry over branching: known wire statuses pass through, everything
   // else (including 5xx typed errors) collapses to 500 for the JSON API.
-  const KNOWN_STATUSES = new Set([400, 401, 403, 404, 409, 413, 429]);
-  return KNOWN_STATUSES.has(mapped.status) ? (mapped.status as 400 | 401 | 403 | 404 | 409 | 413 | 429) : 500;
+  return KNOWN_STATUSES.has(mapped.status) ? (mapped.status as Exclude<ServiceStatus, 500>) : 500;
 }
 
 export { mapServiceError, toServiceStatus };

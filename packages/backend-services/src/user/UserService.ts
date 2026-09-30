@@ -1,12 +1,13 @@
 import { DavVolumeDAO, NamespaceDAO, UserDAO, UserEmailDAO } from '@durable-dav/backend-data/dao';
-import type { NamespaceRow, UserRow } from '@durable-dav/backend-data/dao';
+import type { UserRow } from '@durable-dav/backend-data/dao';
 import type { D1Queryable } from '@durable-dav/backend-data/utils';
 import { BadRequestError, NotFoundError } from '@durable-dav/backend-errors';
-import { USERNAME_MAX_LENGTH, isReservedNamespaceName, isValidUsername } from '@durable-dav/shared/constants';
+import { isReservedNamespaceName, isValidUsername } from '@durable-dav/shared/constants';
 import { TimestampUtil } from '@durable-dav/shared/utils';
 import { cascadeOwnerVolumes } from './volumeRenameCascade';
 import { registerAccount, resolveAccount } from './accountLookup';
 import type { AccountLookupDeps, AccountSummary, ResolvedAccount } from './accountLookup';
+import { deriveUsernameCandidate, namespaceBelongsTo, userBelongsTo } from './usernameRules';
 
 interface UserServiceEnv {
   DB: D1Queryable;
@@ -17,44 +18,17 @@ interface UserServiceDeps extends Partial<AccountLookupDeps> {
   volumeDAO?: () => Promise<DavVolumeDAO>;
 }
 
-function deriveUsernameCandidate(email: string): string {
-  const prefix = email.split('@', 1)[0].toLowerCase();
-  let sanitized = '';
-  for (const ch of prefix) {
-    sanitized += ch === '-' || (ch >= 'a' && ch <= 'z') || (ch >= '0' && ch <= '9') ? ch : '-';
-  }
-  sanitized = sanitized.replaceAll(/-{2,}/g, '-');
-  let start = 0;
-  while (start < sanitized.length && sanitized[start] === '-') start += 1;
-  let end = sanitized.length;
-  while (end > start && sanitized[end - 1] === '-') end -= 1;
-  sanitized = sanitized.slice(start, end);
-  if (isValidUsername(sanitized)) return sanitized;
-  let alnum = '';
-  for (const ch of sanitized) {
-    if ((ch >= 'a' && ch <= 'z') || (ch >= '0' && ch <= '9')) alnum += ch;
-  }
-  return alnum.length > 0 ? alnum.slice(0, USERNAME_MAX_LENGTH) : 'user';
-}
-
 /**
- * Does a namespace claim belong to this account?
+ * Outcome of taking a handle in the `namespaces` registry.
  *
- * `user_id` is the identity once migration 0004 has run. The fallback compares
- * the row's frozen anchor address, which by construction never changes — so both
- * branches mean the same thing, on a pre-0004 row and on a 0004 row whose address
- * matched no account.
+ * - `claimedFresh` — we created the claim, so a later step that fails must
+ *   release it. `false` means the row was already ours and must be left alone.
+ * - `legacyNamespaces` — there is no registry at all (a database predating the
+ *   `namespaces` table), so `users.username` is the only authority.
  */
-function namespaceBelongsTo(row: NamespaceRow, account: ResolvedAccount): boolean {
-  return row.user_id ? row.user_id === account.id : row.user_email?.toLowerCase() === account.anchorEmail.toLowerCase();
-}
-
-/**
- * Does a `users` row belong to this account? Same rule as
- * `namespaceBelongsTo`, for the pre-0004 `users` shape.
- */
-function userBelongsTo(row: UserRow, account: ResolvedAccount): boolean {
-  return row.id ? row.id === account.id : row.email.toLowerCase() === account.anchorEmail.toLowerCase();
+interface HandleClaim {
+  claimedFresh: boolean;
+  legacyNamespaces?: boolean;
 }
 
 class UserService {
@@ -126,7 +100,8 @@ class UserService {
     try {
       const base = deriveUsernameCandidate(account.anchorEmail);
       const handle = await this.findFreeUsername(base);
-      await this.deps.userDAO().then((dao) => dao.ensureUsername(account.id, handle, now));
+      const userDAO = await this.deps.userDAO();
+      await userDAO.ensureUsername(account.id, handle, now);
       const ns = await this.deps.namespaceDAO();
       await ns.claimIgnore({ usernameCi: handle.toLowerCase(), kind: 'user', userEmail: account.anchorEmail, userId: account.id, now });
     } catch {
@@ -163,12 +138,53 @@ class UserService {
     return { id: account.id, email: account.email, username: account.username };
   }
 
+  /**
+   * Look a handle up.
+   *
+   * Propagates a database failure. It used to `catch` and return `null`, which
+   * made `GET /users/:username` report "no such user" during a D1 outage — and
+   * that endpoint is how a client checks whether a handle is available, so a
+   * blip would have looked like a definitive "taken, pick another" answer.
+   * A `null` return now means exactly one thing: no such row.
+   */
   public async getByUsername(username: string): Promise<UserRow | null> {
     const dao = await this.deps.userDAO();
+    return dao.getByUsernameCi(username.toLowerCase());
+  }
+
+  /**
+   * Take the new handle in the `namespaces` registry.
+   *
+   * Split out of `renameUsername` because the outcome is a three-way decision
+   * that the caller has to act on, and encoding it as three mutable flags made
+   * the interaction between them discoverable only by tracing. The flags were:
+   * `claimedFresh` (we own the claim, so a later failure must release it),
+   * `namespaceClaimed` (the name is ours to use), and `legacyNamespaces` (there
+   * is no registry, so `users.username` is authoritative).
+   *
+   * Claim-first ordering is what narrows the rename TOCTOU: the name is claimed
+   * *before* `users` is mutated, so a concurrent claimer wins with a clean abort
+   * instead of leaving `users.username` renamed with no namespace behind it.
+   */
+  private async claimHandle(nsDao: NamespaceDAO, handleCi: string, account: ResolvedAccount, now: number): Promise<HandleClaim> {
     try {
-      return await dao.getByUsernameCi(username.toLowerCase());
-    } catch {
-      return null;
+      await nsDao.claim({ usernameCi: handleCi, kind: 'user', userEmail: account.anchorEmail, userId: account.id, now });
+      return { claimedFresh: true };
+    } catch (error) {
+      // Claim race. If the existing claim belongs to *this* account — a rename
+      // back to a name it previously held — treat it as success.
+      try {
+        const row = await nsDao.get(handleCi).catch(() => null);
+        if (row && namespaceBelongsTo(row, account)) return { claimedFresh: false };
+        if (await nsDao.isTaken(handleCi)) throw new BadRequestError('Username is already taken');
+      } catch (inner) {
+        // A `BadRequestError` is our own verdict ("taken") and must propagate.
+        if (inner instanceof BadRequestError) throw inner;
+        // `get`/`isTaken` themselves threw, which means there is no `namespaces`
+        // table at all: fall back to `users.username` as authoritative.
+        return { claimedFresh: false, legacyNamespaces: true };
+      }
+      throw error instanceof Error ? error : new BadRequestError('Username is already taken');
     }
   }
 
@@ -184,44 +200,15 @@ class UserService {
     const nsDao = await this.deps.namespaceDAO();
     if (await this.isHandleTaken(nsDao, handleCi, account)) throw new BadRequestError('Username is already taken');
     const now = TimestampUtil.getCurrentUnixTimestampInSeconds();
-    // Claim-first ordering narrows the rename TOCTOU: claim the new name
-    // before mutating `users`, so a concurrent claimer wins with a clean
-    // abort instead of leaving `users.username` renamed without a namespace.
-    // If the subsequent update fails, best-effort release the new claim.
-    let claimedFresh = false;
-    let namespaceClaimed = false;
-    let legacyNamespaces = false;
-    try {
-      await nsDao.claim({ usernameCi: handleCi, kind: 'user', userEmail: account.anchorEmail, userId: account.id, now });
-      namespaceClaimed = true;
-      claimedFresh = true;
-    } catch (error) {
-      // Claim race: if the existing claim belongs to self (rename-back after a
-      // failure), treat as success. Otherwise report taken cleanly. Legacy DBs
-      // without a `namespaces` table fall back to `users.username` as
-      // authoritative (claim/isTaken both throw there).
-      try {
-        const row = await nsDao.get(handleCi).catch(() => null);
-        if (row && namespaceBelongsTo(row, account)) {
-          namespaceClaimed = true;
-          claimedFresh = false;
-        } else if (await nsDao.isTaken(handleCi)) {
-          throw new BadRequestError('Username is already taken');
-        }
-      } catch (inner) {
-        if (inner instanceof BadRequestError) throw inner;
-        // isTaken itself threw → namespaces table missing → legacy path.
-        legacyNamespaces = true;
-      }
-      if (!legacyNamespaces && !namespaceClaimed) {
-        throw error instanceof Error ? error : new BadRequestError('Username is already taken');
-      }
-    }
+    const claim = await this.claimHandle(nsDao, handleCi, account, now);
     const oldCi = account.username?.toLowerCase();
+    const userDAO = await this.deps.userDAO();
     try {
-      await this.deps.userDAO().then((dao) => dao.setUsername(account.id, handle, now));
+      await userDAO.setUsername(account.id, handle, now);
     } catch (error) {
-      if (claimedFresh) {
+      // Only release a claim *we* took. Releasing one we merely found already
+      // belonging to us would free a name the account still owns.
+      if (claim.claimedFresh) {
         await nsDao.release(handleCi).catch(() => {
           // ignore rollback failure
         });

@@ -12,22 +12,13 @@ class EnvParser {
   }
 
   /**
-   * Strict variant (why: silent fallback hides misconfiguration — e.g.
-   * `MAX_PACK_OBJECTS=banana` silently becomes 10000). Throws on an
-   * explicitly-set but malformed value; falls back only when unset.
-   * Breaking: callers opting into strict mode fail fast instead of running
-   * with defaults. Used by `AppConfiguration.validate()`.
+   * Whether an explicitly-set numeric var is a usable positive integer.
+   *
+   * Used by `AppConfiguration.validate()` to *report* misconfiguration at
+   * startup while still running with the default. The throwing counterpart
+   * (`strictPositiveInt`) is gone: no caller opted in, and a fail-fast parse on
+   * a request path would turn a config typo into a 500 rather than a warning.
    */
-  public static strictPositiveInt(env: unknown, key: string, defaultValue: string): number {
-    const value = this.readString(env, key);
-    if (value === undefined) return Number(defaultValue);
-    const parsed = Number(value);
-    if (!Number.isSafeInteger(parsed) || parsed <= 0) {
-      throw new Error(`Invalid configuration: ${key} must be a positive integer (got ${JSON.stringify(value)})`);
-    }
-    return parsed;
-  }
-
   public static isValidPositiveInt(env: unknown, key: string): boolean {
     const value = this.readString(env, key);
     if (value === undefined) return true;

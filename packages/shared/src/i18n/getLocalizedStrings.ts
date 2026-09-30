@@ -32,9 +32,4 @@ function getBackendStrings(locale: string | null | undefined): BackendLocaleStri
   return BACKEND_STRINGS[normalizeBackendLocale(locale)];
 }
 
-function resolveLocalizedStrings(locale?: string | null, fallback?: string | null): BackendLocaleStrings {
-  const primary = normalizeBackendLocale(locale);
-  return getBackendStrings(primary === 'en' ? normalizeBackendLocale(fallback) : primary);
-}
-
-export { BACKEND_STRINGS, getBackendStrings, resolveLocalizedStrings };
+export { BACKEND_STRINGS, getBackendStrings };
