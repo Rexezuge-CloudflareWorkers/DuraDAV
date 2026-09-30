@@ -58,6 +58,12 @@ const NON_RETRYABLE_PATTERNS: RegExp[] = [
 function isD1ErrorRetryable(errorMessage: string): boolean {
   if (!errorMessage) return false;
 
+  // Retryable is checked first on purpose. An error can carry both a transient
+  // signal and a permanent-sounding word — "connection: host not found",
+  // "retry: authentication backend unavailable" — and retrying those is correct,
+  // while a bare "row not found" or a UNIQUE/FOREIGN KEY violation still matches
+  // nothing in the retryable list and is correctly refused. The ordering is
+  // pinned by `hardening-round7.test.ts`.
   for (const pattern of RETRYABLE_PATTERNS) {
     if (pattern.test(errorMessage)) return true;
   }
@@ -69,6 +75,11 @@ function isD1ErrorRetryable(errorMessage: string): boolean {
   return false;
 }
 
-export { isD1ErrorRetryable,  };
+export { isD1ErrorRetryable };
 
-export {isMissingSchemaError} from '@durable-dav/shared/utils';
+// `isMissingSchemaError` is re-exported from `shared` for back-compat: it is a
+// Layer 0 predicate (`shared`) because both D1 and DO SQLite report a missing
+// relation identically and `backend-data` (L2) and `dav-store` (L2) may not
+// import each other. The local definition that used to sit here was a duplicate
+// of it — same regex, different `undefined` handling — so the two could drift.
+export { isMissingSchemaError } from '@durable-dav/shared/utils';

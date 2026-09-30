@@ -107,12 +107,18 @@ const PBKDF2_KEY_BYTES = 32;
  *
  * `isSafeInteger` is not a bound: `Number.MAX_SAFE_INTEGER` passes it, so a
  * corrupt or hostile `dav_credentials` row could name a work factor that turns
- * one unauthenticated Basic request into a derivation measured in years. The
- * ceiling is generous enough that a future legitimate work-factor increase (even
- * 100x) still verifies, while turning an absurd value into an ordinary
- * authentication failure.
+ * one unauthenticated Basic request into a derivation measured in years.
+ *
+ * The ceiling is a small multiple of `PBKDF2_ITERATIONS`, not a round number.
+ * This used to be 10 000 000 with a comment claiming it "turns an absurd value
+ * into an ordinary authentication failure" — at ~1.6 ms per 100k iterations
+ * on a Worker isolate, 10M is ~16 s of CPU *inside one unauthenticated request*.
+ * On the free plan (10 ms budget) that is a guaranteed `exceededCpu` 503 for
+ * any request presenting that row; on paid it is a trivial CPU-exhaustion
+ * vector from one corrupt row. Deriving the bound from the default keeps the
+ * intent honest and still tolerates a future 4x work-factor increase.
  */
-const PBKDF2_MAX_ITERATIONS = 10_000_000;
+const PBKDF2_MAX_ITERATIONS = PBKDF2_ITERATIONS * 4;
 
 function base64Url(bytes: Uint8Array): string {
   let binary = '';

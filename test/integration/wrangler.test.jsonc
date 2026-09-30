@@ -7,9 +7,16 @@
     "bindings": [
       { "name": "DAV_VOLUME", "class_name": "DavVolumeWorker" },
       { "name": "CRON_TASKS", "class_name": "CronTasksWorker" },
+      // Password-verification offload. Must be bound here or every Basic-auth
+      // integration test silently exercises only the local-derivation fallback
+      // and the DO tier is untested end-to-end.
+      { "name": "DAV_AUTH", "class_name": "CredentialVerifierDO" },
     ],
   },
-  "migrations": [{ "tag": "v1000000000", "new_sqlite_classes": ["DavVolumeWorker", "CronTasksWorker"] }],
+  "migrations": [
+    { "tag": "v1000000000", "new_sqlite_classes": ["DavVolumeWorker", "CronTasksWorker"] },
+    { "tag": "v1000000001", "new_sqlite_classes": ["CredentialVerifierDO"] },
+  ],
   "d1_databases": [{ "binding": "DB", "database_name": "durable-dav-test-db", "database_id": "00000000-0000-0000-0000-000000000000" }],
   // Without this the KV read cache is inert in integration tests — `KvCache`
   // reports `available: false` and every read falls through to the DO — so

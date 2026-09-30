@@ -58,15 +58,25 @@ class DavCredentialDAO extends BaseDAO {
     username: string,
   ): Promise<(DavCredentialMetadata & { volumeId: string; passwordHash: string }) | undefined> {
     const now = TimestampUtil.getCurrentUnixTimestampInSeconds();
-    const row = await this.database
-      .prepare(
-        `SELECT credential_id, volume_id, username, password_hash, name, password_prefix, password_last_four, created_at, expires_at, last_used_at, read_only
-         FROM dav_credentials
-         WHERE username = ? AND expires_at > ?
-         LIMIT 1`,
-      )
-      .bind(username, now)
-      .first<DavCredentialInternal>();
+    // `firstWithRetry`, not a bare `.first()`: this is the auth hot path, and
+    // `DavAuth` maps a `DatabaseError` here to a 503 "Authentication
+    // unavailable". A bare `.first()` rejects with a raw `D1_ERROR` — not a
+    // `DatabaseError` — so that documented branch was unreachable and a D1 blip
+    // surfaced as an opaque 500. Retrying also matches every write in this DAO,
+    // which always went through `withRetry`.
+    const row = await this.firstWithRetry(
+      () =>
+        this.database
+          .prepare(
+            `SELECT credential_id, volume_id, username, password_hash, name, password_prefix, password_last_four, created_at, expires_at, last_used_at, read_only
+             FROM dav_credentials
+             WHERE username = ? AND expires_at > ?
+             LIMIT 1`,
+          )
+          .bind(username, now)
+          .first<DavCredentialInternal>(),
+      'get active dav credential by username',
+    );
     if (!row) return undefined;
     const metadata = this.toMetadata(row);
     return metadata ? { ...metadata, passwordHash: row.password_hash } : undefined;

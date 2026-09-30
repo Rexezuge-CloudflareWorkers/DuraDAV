@@ -5,6 +5,10 @@ import type { D1Result } from './D1Types';
 const DEFAULT_MAX_RETRIES = 3;
 const DEFAULT_BASE_DELAY_MS = 100;
 
+// Exported so `BaseDAO.firstWithRetry` can reuse the same backoff schedule as
+// `executeD1WithRetry` rather than hard-coding a second, divergent one.
+const D1_RETRY_DEFAULTS = { maxRetries: DEFAULT_MAX_RETRIES, baseDelayMs: DEFAULT_BASE_DELAY_MS } as const;
+
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve: (value: void) => void): unknown => setTimeout(resolve, ms));
 }
@@ -85,4 +89,4 @@ async function executeD1WithRetry(
   throw new DatabaseError(`Failed to ${context} after ${maxRetries + 1} attempts`);
 }
 
-export { executeD1WithRetry, sleep };
+export { executeD1WithRetry, sleep, D1_RETRY_DEFAULTS };

@@ -1,8 +1,8 @@
 import type { Context } from 'hono';
 import { Tokens } from '@durable-dav/backend-services/composition';
 import type { DavVolumeRow } from '@durable-dav/backend-data/dao';
-import { DavCredentialUtil } from '@durable-dav/shared/utils';
 import { davErrorResponse } from '@durable-dav/webdav';
+import { verifyCredential } from './credentialVerifier';
 import type { DavHrefPrefixMode } from '@durable-dav/shared/constants';
 import { readDavHrefPrefixMode } from '@durable-dav/shared/constants';
 import { DatabaseError } from '@durable-dav/backend-errors';
@@ -62,14 +62,24 @@ export interface DavAuthResult {
 /**
  * Parse a `Basic` Authorization header.
  *
+ * The scheme token is matched case-insensitively, per RFC 9110 §11.1: "auth-scheme
+ * is case-insensitive". This was `header.startsWith('Basic ')`, so a client
+ * sending `basic <base64>` — legal, and what some HTTP libraries emit — had its
+ * credential silently ignored and fell through to the anonymous branch: a 401 on
+ * a private bucket, or worse, an *anonymous* read on a public one with no
+ * `X-Dav-User` attribution. Only the scheme is case-folded; the decoded
+ * username/password are untouched, because they are opaque byte sequences.
+ *
  * Note the password is not trimmed: the credential is `ddav_` + base64url, and
  * trimming would silently accept a mistyped credential with surrounding
  * whitespace.
  */
 function getBasicCredentials(header: string | null): { username: string; password: string } | null {
-  if (!header || !header.startsWith('Basic ')) return null;
+  if (!header) return null;
+  const separator = header.indexOf(' ');
+  if ((separator === -1) || (header.slice(0, separator).toLowerCase() !== 'basic')) return null;
   try {
-    const decoded = atob(header.slice(6).trim());
+    const decoded = atob(header.slice(separator + 1).trim());
     const idx = decoded.indexOf(':');
     if (idx === -1) return null;
     const username = decoded.slice(0, idx).trim();
@@ -181,13 +191,19 @@ async function davAuthForVolumeInner(
     // Load by the (globally unique) username, then verify.
     const credential = await credentialDAO.getActiveByUsername(basic.username);
     if (!credential) return unauthorizedDav();
-    // A malformed stored hash throws. Treat it as a failed auth rather than a
-    // 500: the row is unusable either way, and surfacing 401 lets the client
-    // mint a fresh credential instead of seeing an opaque error.
-    const { ok, needsRehash } = await DavCredentialUtil.verifyPassword(basic.password, credential.passwordHash).catch(() => ({
-      ok: false,
-      needsRehash: false,
-    }));
+    // A malformed stored hash is a failed auth, not a 500: the row is unusable
+    // either way, and surfacing 401 lets the client mint a fresh credential
+    // instead of seeing an opaque error. (The throw is handled one layer down,
+    // in `verifyCredential`, so all three tiers report it the same way.)
+    //
+    // Verification is tiered — isolate memo, then the verifier DO, then a local
+    // derivation — because a single PBKDF2 derivation overruns the Free plan's
+    // 10 ms CPU budget and Cloudflare answers `exceededCpu` with a 503. See
+    // `credentialVerifier.ts`. The stored hash is passed in rather than looked
+    // up here: the D1 read above stays per-request, so only the derivation is
+    // ever reused.
+    const verified = await verifyCredential(c.env, basic.username, basic.password, credential.passwordHash);
+    const { ok, needsRehash, upgradedHash } = verified;
     if (!ok) return unauthorizedDav();
     if (credential.volumeId !== volume.id) return unauthorizedDav();
     // Read-only credentials (migration 0005) get exactly the read methods.
@@ -202,15 +218,19 @@ async function davAuthForVolumeInner(
     // Opportunistic upgrade: a credential still on the legacy unsalted
     // SHA-256 digest is re-hashed the first time it is used, so the migration
     // completes without a password-reset prompt and without a batch job.
-    if (needsRehash) {
-      await credentialDAO
-        .updatePasswordHash(credential.credentialId, await DavCredentialUtil.hashPassword(basic.password))
-        .catch((error: unknown) => {
-          console.error('credential rehash failed; credential stays on the legacy digest', {
-            credentialId: credential.credentialId,
-            error: error instanceof Error ? (error.stack ?? error.message) : error,
-          });
+    //
+    // `upgradedHash` comes back from whichever tier verified, so the new-format
+    // hash is already computed by the derivation we just paid for. This used to
+    // call `hashPassword` here, which was a *second* full derivation in the
+    // same request — the worst-case CPU path in the whole auth flow, and the one
+    // that made a legacy credential the most likely to blow the CPU budget.
+    if (needsRehash && upgradedHash) {
+      await credentialDAO.updatePasswordHash(credential.credentialId, upgradedHash).catch((error: unknown) => {
+        console.error('credential rehash failed; credential stays on the legacy digest', {
+          credentialId: credential.credentialId,
+          error: error instanceof Error ? (error.stack ?? error.message) : error,
         });
+      });
     }
     // `last_used_at` is genuinely best-effort telemetry; a failure here must
     // not fail an otherwise-valid request.

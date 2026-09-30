@@ -7,4 +7,4 @@ export default {
   scheduled: (event: ScheduledController, env: Env, ctx: ExecutionContext) => worker.scheduled(event, env, ctx),
 };
 
-export { CronTasksWorker, DavVolumeWorker } from '@durable-dav/background';
+export { CronTasksWorker, DavVolumeWorker, CredentialVerifierDO } from '@durable-dav/background';
