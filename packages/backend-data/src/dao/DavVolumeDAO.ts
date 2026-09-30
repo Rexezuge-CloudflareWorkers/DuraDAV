@@ -86,11 +86,18 @@ class DavVolumeDAO extends BaseDAO {
   }
 
   public async getByOwnerName(owner: string, name: string): Promise<DavVolumeRow | null> {
-    const result = await this.database
-      .prepare('SELECT * FROM dav_volumes WHERE owner_ci = ? AND name_ci = ? LIMIT 1')
-      .bind(owner.toLowerCase(), name.toLowerCase())
-      .first<DavVolumeRow>();
-    return result ?? null;
+    // `firstWithRetry`, not a bare `.first()`: this is the first query on every
+    // DAV request, and `DavAuth` documents a `DatabaseError` -> 503 contract for
+    // exactly this lookup. A bare `.first()` rejects with a raw `D1_ERROR`,
+    // which is not a `DatabaseError`, so that branch could never fire.
+    return this.firstWithRetry(
+      () =>
+        this.database
+          .prepare('SELECT * FROM dav_volumes WHERE owner_ci = ? AND name_ci = ? LIMIT 1')
+          .bind(owner.toLowerCase(), name.toLowerCase())
+          .first<DavVolumeRow>(),
+      'get dav volume by owner and name',
+    );
   }
 
   public async getById(id: string): Promise<DavVolumeRow | null> {

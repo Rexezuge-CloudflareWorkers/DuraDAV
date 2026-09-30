@@ -32,12 +32,29 @@
         "name": "CRON_TASKS",
         "class_name": "CronTasksWorker",
       },
+      // Password-verification offload. A Worker on the Free plan has a 10 ms
+      // CPU budget, and one PBKDF2 derivation at 100k iterations costs more
+      // than that, so verifying in the Worker made Cloudflare answer every
+      // Basic-auth request with 503 (`outcome: "exceededCpu"`). A DO gets 30 s
+      // regardless of plan. Internal only — never route to it from the open
+      // internet; see CredentialVerifierDO.
+      {
+        "name": "DAV_AUTH",
+        "class_name": "CredentialVerifierDO",
+      },
     ],
   },
   "migrations": [
     {
       "tag": "v1000000000",
       "new_sqlite_classes": ["DavVolumeWorker", "CronTasksWorker"],
+    },
+    {
+      // Added separately from v1000000000: that tag is already deployed, and a
+      // DO class added to an applied tag is not registered. Existing tags are
+      // immutable, so the new class needs its own.
+      "tag": "v1000000001",
+      "new_sqlite_classes": ["CredentialVerifierDO"],
     },
   ],
   "d1_databases": [
