@@ -13,13 +13,14 @@ Scope: `apps/api/**`. Parent index: `../../AGENTS.md`.
 
 - `/user/*` — Cloudflare Access (`DEMO_MODE` → `DEV_AUTH_EMAIL` → JWT → `ctx.access` fallback). Neither bypass is set in `wrangler.template.jsonc`: each authenticates _every_ unauthenticated request as a fixed identity, and `AppConfiguration.validate()` warns if one is present with `ENVIRONMENT=production`. The address is then resolved to an account through the `user_emails` registry, so a user who has changed address lands on the same account; there is deliberately **no** self-service address-change route (see `UserIdentityService` in the backend-services guide).
 - WebDAV `/:owner/:volume/*` — bucket-level Basic only (username AND password validated, bound to volume id, expiry enforced). Public buckets allow anon reads; all writes and all private access require a bucket credential. No Bearer, no user-level PAT, no collaborators.
+- Read-only credentials: `davAuthForVolume` takes `needWrite` and refuses a write from a `read_only` credential with **403** + a `DAV:error` body and **no** `WWW-Authenticate` (a 401, or a 403 carrying that header, re-prompts a native client forever). The check sits right after the volume-binding check and before the rehash/`last_used_at` writes, so a refused attempt costs no D1 write. Enforcement lives here and nowhere else — the DO has no auth, so a request that reaches it was already allowed. A read-only credential has no owner exemption: `Basic` carries no owner identity, and the browser plane (Access, owner-authenticated) is unaffected.
 
 ## Routes
 
 - WebDAV CORS: `applyCors(response, request, SITE_URL)` — allow-list, not origin reflection, plus `Vary: Origin`. Unset `SITE_URL` degrades to same-origin only.
 - WebDAV: `OPTIONS` (`Allow` + `DAV: 1, 2`) · `PROPFIND` · `PROPPATCH` · `MKCOL` · `GET`/`HEAD` (Range, HTML browser for collections) · `PUT` · `DELETE` · `COPY`/`MOVE` (`Destination` same-origin, `Overwrite`) · `LOCK`/`UNLOCK` (all in `DavVolumeWorker`, front only auth + forward + CORS).
 - Volumes: `GET|POST /user/volumes` · `GET|PATCH|DELETE /user/volumes/:owner/:volume`.
-- Credentials: `GET|POST /user/volumes/:owner/:volume/credentials` · `DELETE /user/volumes/:owner/:volume/credentials/:id`.
+- Credentials: `GET|POST /user/volumes/:owner/:volume/credentials` · `PATCH|DELETE /user/volumes/:owner/:volume/credentials/:id`. `POST` takes `readOnly`; `PATCH` takes `{ readOnly }` and flips it, returning the updated row.
 - Users: `GET /user/me` · `GET /users/:username`.
 - Public: `GET /` (minimal HTML volume browser) · `GET /health` · `/docs`.
 
