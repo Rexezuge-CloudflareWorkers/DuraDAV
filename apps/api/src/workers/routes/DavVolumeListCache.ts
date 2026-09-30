@@ -1,12 +1,14 @@
 import type { KvCache } from '@durable-dav/backend-runtime/kv';
-import { DAV_META_TTL_SECONDS } from './DavReadCache';
 
 /**
  * The per-owner volume-list cache.
  *
  * Split out of `DavReadCache` so the key-shape rule below sits next to the
  * three functions that depend on it, rather than inside a file that also owns
- * every DAV read path.
+ * every DAV read path. `DAV_META_TTL_SECONDS` came with it: it lived in
+ * `DavReadCache`, which re-exported the functions from *this* file — a cycle
+ * that only worked because the constant was dereferenced lazily at call time.
+ * The TTL now has exactly one home.
  *
  * ## Why the key is the account id
  *
@@ -17,6 +19,16 @@ import { DAV_META_TTL_SECONDS } from './DavReadCache';
  * (`users.id`, migration 0004) means one entry per account stays addressable for
  * its whole TTL, so an invalidation after a change actually lands.
  */
+
+/**
+ * TTL for the volume-list snapshot.
+ *
+ * Deliberately independent of `DAV_CACHE_TTL_SECONDS`, which scales only the two
+ * *content* caches. This one backs the dashboard list, where a stale row is
+ * immediately visible to the user — unlike a stale file body, which the next
+ * read simply misses.
+ */
+const DAV_META_TTL_SECONDS = 60;
 
 /**
  * Owner segment of the cache key.
@@ -53,4 +65,4 @@ async function putCachedVolumeList(cache: KvCache, ownerKey: string, value: unkn
   }
 }
 
-export { getCachedVolumeList, invalidateVolumeListCache, putCachedVolumeList };
+export { getCachedVolumeList, invalidateVolumeListCache, putCachedVolumeList, DAV_META_TTL_SECONDS };

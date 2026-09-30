@@ -13,21 +13,21 @@ interface WorkerScheduledController {
 }
 
 abstract class AbstractEntrypointWorker {
+  /**
+   * The HTTP request path.
+   *
+   * There is deliberately no `/__scheduled` branch here. It used to run before
+   * `onRequest`, which made `GET /__scheduled` an unauthenticated, un-rated
+   * trigger for the scheduled work: it bypassed the app's security headers, its
+   * request scope, and its rate limits, and any caller could fire the cron
+   * Durable Object on demand. `noRetry` was a `(): void => undefined` stub, so
+   * the retry semantics were lost too.
+   *
+   * Nothing needed it — `scheduled()` is wired through the platform by the
+   * `triggers.crons` entry in the wrangler config, which is how the cron
+   * actually runs.
+   */
   public async fetch(request: Request, env: Env, ctx: WorkerExecutionContext): Promise<Response> {
-    const url: URL = new URL(request.url);
-    if ('/__scheduled' === url.pathname) {
-      await this.scheduled(
-        {
-          cron: url.searchParams.get('cron') || '',
-          scheduledTime: Date.now(),
-          noRetry: (): void => undefined,
-        },
-        env,
-        ctx,
-      );
-      return new Response(null, { status: 204 });
-    }
-
     try {
       return await this.onRequest(request, env, ctx);
     } catch (err: unknown) {

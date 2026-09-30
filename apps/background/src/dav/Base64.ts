@@ -28,7 +28,7 @@ function bytesToBase64(bytes: Uint8Array): string {
     out += `${BASE64_ALPHABET[value >> 2]}${BASE64_ALPHABET[(value << 4) & 63]}==`;
   } else if (remainder === 2) {
     const pair = (bytes[limit] << 8) | bytes[limit + 1];
-    out += `${BASE64_ALPHABET[pair >> 10]}${BASE64_ALPHABET[(pair >> 4) & 63]}` + `${BASE64_ALPHABET[(pair << 2) & 63]}=`;
+    out += `${BASE64_ALPHABET[pair >> 10]}${BASE64_ALPHABET[(pair >> 4) & 63]}${BASE64_ALPHABET[(pair << 2) & 63]}=`;
   }
   return out;
 }

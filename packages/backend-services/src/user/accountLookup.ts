@@ -30,6 +30,17 @@ export interface AccountLookupDeps {
  */
 type UserRowLike = { id?: string | null; email: string; current_email?: string | null; username: string | null } | null;
 
+/**
+ * Project a `users` row onto a `ResolvedAccount`.
+ *
+ * The `current_email ?? email` fallback is the 0004 rule in one place: before
+ * the migration there is no `current_email` and the anchor *is* the login
+ * address. It used to be written out at four call sites, each of which had to
+ * remember that rule independently.
+ *
+ * Returns `null` for a row with no id — a pre-0004 row read without migration
+ * 0004 applied, which is not an account this code can act on.
+ */
 function summarize(row: UserRowLike): ResolvedAccount | null {
   return row?.id ? { id: row.id, email: (row.current_email ?? row.email).toLowerCase(), anchorEmail: row.email, username: row.username ?? null } : null;
 }
@@ -120,3 +131,6 @@ export async function registerAccount(
     });
   return resolveAccount(deps, loginEmail);
 }
+
+export { summarize };
+export type { UserRowLike };

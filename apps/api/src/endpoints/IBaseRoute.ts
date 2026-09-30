@@ -7,7 +7,6 @@ import { getBackendStrings } from '@durable-dav/shared/i18n';
 import { ErrorSanitizationUtil, canonicalizeLanguageTag } from '@durable-dav/shared/utils';
 import { createRequestScope } from '@durable-dav/backend-services/composition';
 import { getRequestScope, asScopedContext } from '@durable-dav/backend-runtime/di';
-import { toServiceStatus as toMappedStatus } from '@durable-dav/backend-services/errors';
 
 type HonoContext = ApiContext;
 
@@ -17,34 +16,24 @@ Largest JSON request body the API accepts.
 const MAX_JSON_BODY_BYTES = 1_048_576;
 
 /**
- * Template Method base for Hono route handlers (Otter `IBaseRoute` pattern).
- * Subclasses implement `handleRequest`; the base owns error mapping so
- * handlers stop duplicating `catch(()=>null)` / status-code switches and
- * private-repo existence hiding stays consistent.
+ * Shared statics for Hono route handlers.
  *
- * Backend `Message` stays English (translate display-side per Otter i18n
- * guidance); `getBackendStrings` is wired here so the shared backend locale
- * bundle is live code, not dead code.
+ * A namespace, not a base class: the Template Method it used to be
+ * (`abstract handleRequest` + `handle()` owning the try/catch) had **zero**
+ * subclasses — `VolumeScopedRoute` reimplements the same try/catch against the
+ * same `toErrorResponse` — so it advertised an inheritance contract nothing was
+ * using while the doc comment claimed handlers "stop duplicating" error mapping.
  *
- * Shared statics (`getScope`, `readJson`, `toServiceStatus`, `jsonError`,
- * `toErrorResponse`) are the single source of truth;
- * `PublicViewerResolver` delegates to them so both stay consistent.
+ * `getScope`, `readJson`, `jsonError` and `toErrorResponse` are the single
+ * source of truth for scope resolution, body reading, and the AWS-style
+ * `{Exception:{Type,Message}}` wire shape. `VolumeScopedRoute` is the template
+ * method for volume-scoped handlers; these are the parts it is built from.
  */
 abstract class BaseRoute {
-  protected abstract handleRequest(c: HonoContext): Promise<Response>;
-
-  public async handle(c: HonoContext): Promise<Response> {
-    try {
-      return await this.handleRequest(c);
-    } catch (error) {
-      return BaseRoute.toErrorResponse(c, error);
-    }
-  }
-
   /**
-   * Single-scope resolution (Otter pattern). Prefers the per-request container
-   * installed by `scopeMiddleware`; falls back to a fresh scope for call sites
-   * outside middleware ordering (tests, git auth helpers).
+   * Single-scope resolution. Prefers the per-request container installed by
+   * `scopeMiddleware`; falls back to a fresh scope for call sites outside
+   * middleware ordering (tests, git auth helpers).
    */
   public static getScope(c: { get(key: string): unknown; env: unknown }): ReturnType<typeof createRequestScope> {
     try {
@@ -86,10 +75,6 @@ abstract class BaseRoute {
     }
   }
 
-  public static toServiceStatus(error: unknown): 400 | 401 | 403 | 404 | 409 | 413 | 429 | 500 {
-    return toMappedStatus(error);
-  }
-
   /**
    * Status → AWS `Exception.Type` mapping for direct validation returns.
    * Call sites that previously wrote `c.json({ error: msg }, status)` must
@@ -116,6 +101,23 @@ abstract class BaseRoute {
 
   public static jsonError(c: HonoContext, message: string, status: number): Response {
     return c.json({ Exception: { Type: this.toErrorType(status), Message: message } }, status as ContentfulStatusCode);
+  }
+
+  /**
+   * The answer to a `readJson` that failed to produce a body.
+   *
+   * Six call sites previously wrote the oversized/malformed pair by hand while
+   * `UserRoutes` used `jsonError` for the same two cases — two competing
+   * builders for one wire shape, and the hand-written ones had already drifted
+   * away from the `ERROR_TYPE_REGISTRY` that decides the `Type`. Returns `null`
+   * for a body that parsed, so a handler is one `if` rather than two.
+   */
+  public static rejectUnreadableBody(
+    c: HonoContext,
+    read: { malformed: boolean; oversized: boolean },
+  ): Response | null {
+    if (read.oversized) return this.jsonError(c, 'Payload too large', 413);
+    return read.malformed ? this.jsonError(c, 'Invalid JSON body', 400) : null;
   }
 
   public static toErrorResponse(c: HonoContext, error: unknown): Response {

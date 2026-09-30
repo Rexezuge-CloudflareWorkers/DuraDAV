@@ -38,10 +38,6 @@ class KvCache {
     return !!this.namespace;
   }
 
-  public keyFor(domain: KvDomainName, parts: readonly string[]): string {
-    return buildKvKey(domain, parts);
-  }
-
   public async getText(domain: KvDomainName, parts: readonly string[]): Promise<string | null> {
     const ns = this.namespace;
     if (!ns) return null;
@@ -56,8 +52,10 @@ class KvCache {
   public async putText(domain: KvDomainName, parts: readonly string[], value: string, options?: KvPutOptions): Promise<boolean> {
     const ns = this.namespace;
     if (!ns) return false;
+    // No unknown-domain check: `buildKvKey` below throws for one, and the
+    // return type has never been able to express that. A silent `false` here
+    // would have made an unknown domain look like a namespace miss.
     const def = KV_DOMAINS[domain];
-    if (!def) return false;
     if (utf8ByteLength(value) > def.maxValueBytes) {
       logger.debug(`KV put skipped for ${domain}: value exceeds ${def.maxValueBytes} bytes.`);
       return false;

@@ -1,11 +1,17 @@
 // Identity/governance bindings: auth, users, volumes, permissions.
 // Single DavPermissionService and UserIdentityService bindings live here;
 // dependents resolve them via the container, never `new`.
-import { AccessAuthService } from '@durable-dav/backend-services/auth';
-import { DavPermissionService } from '@durable-dav/backend-services/dav';
-import { VolumeService } from '@durable-dav/backend-services/dav';
-import { VolumeCredentialService } from '@durable-dav/backend-services/dav';
-import { UserService } from '@durable-dav/backend-services/user';
+//
+// Relative imports, not `@durable-dav/backend-services/*`. Self-imports gave
+// one module two specifiers in the same package, which a bundler is free to
+// emit twice — harmless for a stateless class, but it would silently duplicate
+// `AccessAuthService`'s `private static readonly jwksCache` Map. Every other
+// file in this package uses relative paths for the same reason.
+import { AccessAuthService } from '../../auth/AccessAuthService';
+import { DavPermissionService } from '../../dav/DavPermissionService';
+import { VolumeService } from '../../dav/VolumeService';
+import { VolumeCredentialService } from '../../dav/VolumeCredentialService';
+import { UserService } from '../../user/UserService';
 import { AppConfiguration } from '@durable-dav/backend-runtime/config';
 import type { Container } from '@durable-dav/backend-runtime/di';
 import { Tokens } from '../tokens';

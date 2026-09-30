@@ -1,6 +1,5 @@
 import { Tokens } from '@durable-dav/backend-services/composition';
 import type { DavVolumeRow } from '@durable-dav/backend-data/dao';
-import type { VolumePatch } from '@durable-dav/backend-services/dav';
 import { readDavHrefPrefixMode } from '@durable-dav/shared/constants';
 import type { DavHrefPrefixMode } from '@durable-dav/shared/constants';
 import { BaseRoute } from '@/endpoints/IBaseRoute';
@@ -11,6 +10,17 @@ import { VolumeScopedRoute, requireUser, withErrorMapping } from './VolumeScoped
 import type { VolumeRequestContext } from './VolumeScopedRoute';
 
 type App = ApiApp;
+
+/**
+ * Page size for the volume list.
+ *
+ * Matches `MAX_VOLUMES_PER_USER`'s default, so the list is complete for any
+ * account within quota. If an operator raises the quota, this has to be raised
+ * with it — otherwise the dashboard silently truncates. Truncation is the
+ * failure mode to avoid here: the API answers 200 with a short list and no
+ * indication that anything is missing.
+ */
+const MAX_VOLUMES_PER_USER = 100;
 
 type VolumeJson = {
   owner: string;
@@ -39,7 +49,7 @@ function toVolumeJson(r: { owner: string; name: string; description: string | nu
 }
 
 /**
- * `GET /user/volumes` — KV-cached per owner email (60s).
+ * `GET /user/volumes` — KV-cached per account id (60s).
  *
  * No `Cache-Control` argument is passed on purpose: `securityHeaders` applies
  * `Cache-Control: no-store` to every `/user/*` response *after* the handler
@@ -84,12 +94,18 @@ async function listOwnedVolumes(scope: ReturnType<typeof BaseRoute.getScope>, us
   const dao = await scope.get(Tokens.DavVolumeDAO)();
   if (userId) {
     try {
-      return await dao.listByOwnerUserId(userId, 100);
-    } catch {
-      // Fall through to the address path.
+      return await dao.listByOwnerUserId(userId, MAX_VOLUMES_PER_USER);
+    } catch (error) {
+      // Fall through to the address path. Logged because a genuine D1 failure
+      // is indistinguishable here from the intended pre-0004 case, and a
+      // silently-wrong volume list is hard to notice from the outside.
+      console.warn('id-keyed volume list failed; falling back to the address path', {
+        userId,
+        error: error instanceof Error ? (error.stack ?? error.message) : error,
+      });
     }
   }
-  return dao.listByOwnerEmail(email, 100);
+  return dao.listByOwnerEmail(email, MAX_VOLUMES_PER_USER);
 }
 
 class VolumeDetail extends VolumeScopedRoute {
@@ -109,16 +125,20 @@ class VolumeDetail extends VolumeScopedRoute {
 
 class UpdateVolume extends VolumeScopedRoute {
   protected async run(c: ApiContext, { scope, email, userId, viewer, row }: VolumeRequestContext): Promise<Response> {
-    const { malformed, oversized, body } = await BaseRoute.readJson<VolumePatch>(c);
-    if (oversized) return c.json({ Exception: { Type: 'PayloadTooLarge', Message: 'Payload too large' } }, 413);
-    if (malformed) return c.json({ Exception: { Type: 'BadRequest', Message: 'Invalid JSON body' } }, 400);
-    const patch: VolumePatch = {};
-    if ('description' in body) patch.description = body.description ?? null;
-    if ('isPrivate' in body) patch.isPrivate = body.isPrivate;
-    // Passed through unvalidated so `VolumeService.validateVolumePatch` owns the
-    // enum check and answers 400 — the route has no second copy of the rule to
-    // drift from.
-    if ('hrefPrefixMode' in body) patch.hrefPrefixMode = body.hrefPrefixMode;
+    // Widened to `unknown` on purpose: these are client-controlled values, and
+    // `parseVolumePatch` is the runtime check that they are what they claim.
+    const read = await BaseRoute.readJson<{ description?: unknown; isPrivate?: unknown; hrefPrefixMode?: DavHrefPrefixMode }>(c);
+    const unreadable = BaseRoute.rejectUnreadableBody(c, read);
+    if (unreadable) return unreadable;
+    const { body } = read;
+    // Rebuilt field-by-field so an absent key stays absent: `?? null` would turn
+    // a missing `description` into an explicit clear, and the service's
+    // "Nothing to update" check counts presence, not truthiness.
+    const patch = {
+      ...(('description' in body) && { description: body.description }),
+      ...(('isPrivate' in body) && { isPrivate: body.isPrivate }),
+      ...(('hrefPrefixMode' in body) && { hrefPrefixMode: body.hrefPrefixMode }),
+    };
     const updated = await scope.get(Tokens.VolumeService).updateVolume(row.owner, row.name, viewer, patch);
     const cache = scope.get(Tokens.KvCache);
     await invalidateVolumeListCache(cache, userId ?? email);
@@ -167,25 +187,33 @@ async function handleCreateVolume(c: ApiContext): Promise<Response> {
   if (identity instanceof Response) return identity;
   const { email, userId } = identity;
   const scope = BaseRoute.getScope(c);
-  const { malformed, oversized, body } = await BaseRoute.readJson<{
+  // Deliberately widened: these are client-controlled JSON values whose real
+  // types are unknown until `parseVolumePatch` has checked them. Typing them
+  // as the accepted shape here would make `createVolume`'s own guard a
+  // compile-time lie rather than a runtime check.
+  const read = await BaseRoute.readJson<{
     owner?: string;
     name?: string;
-    isPrivate?: boolean;
-    description?: string | null;
+    isPrivate?: unknown;
+    description?: unknown;
     hrefPrefixMode?: DavHrefPrefixMode;
   }>(c);
-  if (oversized) return c.json({ Exception: { Type: 'PayloadTooLarge', Message: 'Payload too large' } }, 413);
-  if (malformed) return c.json({ Exception: { Type: 'BadRequest', Message: 'Invalid JSON body' } }, 400);
-  if (!body.owner || !body.name) {
-    return c.json({ Exception: { Type: 'BadRequest', Message: 'owner and name are required' } }, 400);
-  }
+  const unreadable = BaseRoute.rejectUnreadableBody(c, read);
+  if (unreadable) return unreadable;
+  const { body } = read;
+  if (!body.owner || !body.name) return BaseRoute.jsonError(c, 'owner and name are required', 400);
   // `VolumeService` enforces owner == caller's username and fails closed, so
-  // the route does not duplicate that check.
+  // the route does not duplicate that check. `description`, `isPrivate` and
+  // `hrefPrefixMode` are passed through with their *declared* types intact
+  // rather than pre-defaulted: `?? true` would turn a client-sent
+  // `isPrivate: "false"` into a boolean before the validator ever saw it, which
+  // is the one outcome the private-by-default rule must not produce by
+  // accident. `parseVolumePatch` owns the type checks and answers 400.
   const created = await scope.get(Tokens.VolumeService).createVolume({
     owner: body.owner,
     name: body.name,
-    description: body.description ?? null,
-    isPrivate: body.isPrivate ?? true,
+    description: body.description,
+    isPrivate: body.isPrivate,
     hrefPrefixMode: body.hrefPrefixMode,
     creatorEmail: email,
   });

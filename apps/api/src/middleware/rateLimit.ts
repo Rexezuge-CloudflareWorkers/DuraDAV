@@ -110,12 +110,16 @@ function rateLimit(opts: {
   };
 }
 
+/**
+ * The key this request is counted against.
+ *
+ * The authenticated address when there is one, the client IP otherwise. No
+ * try/catch: Hono's `c.get` returns `undefined` for a missing key and does not
+ * throw, and the only caller is already inside a fail-open `try`. The old
+ * `catch` here was dead code on a path that had already been made total.
+ */
 function readIdentity(c: RateLimitContext): string {
-  try {
-    return c.get('AuthenticatedUserEmailAddress') ?? `ip:${clientIp(c)}`;
-  } catch {
-    return `ip:${clientIp(c)}`;
-  }
+  return c.get('AuthenticatedUserEmailAddress') ?? `ip:${clientIp(c)}`;
 }
 
 function resetRateLimitForTests(): void {

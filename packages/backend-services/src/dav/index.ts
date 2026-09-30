@@ -6,5 +6,5 @@ export { VolumeService } from './VolumeService';
 export type { VolumeServiceDeps, VolumeServiceEnv } from './VolumeService';
 export { VolumeCredentialService } from './VolumeCredentialService';
 export type { VolumeCredentialServiceDeps, VolumeCredentialServiceEnv } from './VolumeCredentialService';
-export { checkVolumeQuota, validateVolumePatch } from './VolumeCreatePolicy';
-export type { VolumePatch } from './VolumeCreatePolicy';
+export { checkVolumeQuota, parseVolumePatch } from './VolumeCreatePolicy';
+export type { VolumePatch, VolumePatchInput } from './VolumeCreatePolicy';

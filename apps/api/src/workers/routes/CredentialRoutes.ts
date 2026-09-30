@@ -30,11 +30,11 @@ class CreateCredential extends VolumeScopedRoute {
     // Routed through `BaseRoute.readJson` so malformed JSON and an oversize
     // body are distinguished, and so the body is size-capped like every other
     // JSON endpoint.
-    const { malformed, oversized, body } = await BaseRoute.readJson<{ name?: string; expiresInDays?: unknown; readOnly?: unknown }>(c);
-    if (oversized) return c.json({ Exception: { Type: 'PayloadTooLarge', Message: 'Payload too large' } }, 413);
-    if (malformed || !body.name) {
-      return c.json({ Exception: { Type: 'BadRequest', Message: malformed ? 'Invalid JSON body' : 'name is required' } }, 400);
-    }
+    const read = await BaseRoute.readJson<{ name?: string; expiresInDays?: unknown; readOnly?: unknown }>(c);
+    const unreadable = BaseRoute.rejectUnreadableBody(c, read);
+    if (unreadable) return unreadable;
+    const { body } = read;
+    if (!body.name) return BaseRoute.jsonError(c, 'name is required', 400);
     const created = await scope
       .get(Tokens.VolumeCredentialService)
       .createCredential(row.id, row.name, body.name, body.expiresInDays, body.readOnly);
@@ -67,11 +67,14 @@ class CreateCredential extends VolumeScopedRoute {
  */
 class UpdateCredential extends VolumeScopedRoute {
   protected async run(c: ApiContext, { scope, row }: VolumeRequestContext): Promise<Response> {
-    const { malformed, oversized, body } = await BaseRoute.readJson<{ readOnly?: unknown }>(c);
-    if (oversized) return c.json({ Exception: { Type: 'PayloadTooLarge', Message: 'Payload too large' } }, 413);
-    if (malformed || typeof body.readOnly !== 'boolean') {
-      return c.json({ Exception: { Type: 'BadRequest', Message: malformed ? 'Invalid JSON body' : 'readOnly must be a boolean' } }, 400);
-    }
+    const read = await BaseRoute.readJson<{ readOnly?: unknown }>(c);
+    const unreadable = BaseRoute.rejectUnreadableBody(c, read);
+    if (unreadable) return unreadable;
+    const { body } = read;
+    // A non-boolean is a 400 and never a silent `false`: quietly defaulting
+    // `"true"` to full access is the one outcome that must not happen by
+    // accident.
+    if (typeof body.readOnly !== 'boolean') return BaseRoute.jsonError(c, 'readOnly must be a boolean', 400);
     const updated = await scope
       .get(Tokens.VolumeCredentialService)
       .setCredentialReadOnly(row.id, c.req.param('id') ?? '', body.readOnly);

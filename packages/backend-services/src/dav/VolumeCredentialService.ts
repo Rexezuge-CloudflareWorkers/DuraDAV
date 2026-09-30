@@ -17,6 +17,15 @@ interface VolumeCredentialServiceDeps {
   config?: AppConfiguration;
 }
 
+/**
+ * How many times to re-roll a colliding generated username.
+ *
+ * A bound, not a `while (true)`: five consecutive collisions on a
+ * `volume-adjective-animal-digits` space with a random component is not
+ * something a user should be left retrying against.
+ */
+const MAX_USERNAME_GENERATION_ATTEMPTS = 5;
+
 class VolumeCredentialService {
   private readonly deps: Required<VolumeCredentialServiceDeps>;
 
@@ -40,6 +49,40 @@ class VolumeCredentialService {
     return dao.listByVolume(volumeId);
   }
 
+  /**
+   * Resolve `expiresInDays` from an untrusted body value.
+   *
+   * Accepts a numeric string as well as a number because the value arrives from
+   * parsed JSON, where a client that quoted it is not wrong about intent. The
+   * upper bound is the config's, not a constant, so raising
+   * `MAX_CREDENTIAL_EXPIRY_DAYS` takes effect without a code change.
+   */
+  private resolveExpiryDays(expiresInDays: unknown, maxDays: number): number {
+    const defaultDays = this.deps.config.getDefaultCredentialExpiryDays();
+    if (expiresInDays === undefined || expiresInDays === null) return defaultDays;
+    const numeric: unknown =
+      typeof expiresInDays === 'string' && /^\d+$/.test(expiresInDays.trim()) ? Number(expiresInDays.trim()) : expiresInDays;
+    if (!Number.isSafeInteger(numeric) || (numeric as number) < 1) {
+      throw new BadRequestError('expiresInDays must be a positive integer');
+    }
+    const days = numeric as number;
+    if (days > maxDays) throw new BadRequestError(`Credential expiry cannot exceed ${maxDays} days.`);
+    return days;
+  }
+
+  /**
+   * Validate the caller-supplied credential name.
+   *
+   * Length-checked here rather than by a column constraint so an over-long name
+   * is a 400 on the caller's own request instead of a 500 from the INSERT.
+   */
+  private static resolveName(name: unknown): string {
+    const trimmed = typeof name === 'string' ? name.trim() : '';
+    if (!trimmed) throw new BadRequestError('name is required');
+    if (trimmed.length > 100) throw new BadRequestError('name must be at most 100 characters');
+    return trimmed;
+  }
+
   public async createCredential(
     volumeId: string,
     volumeName: string,
@@ -52,31 +95,18 @@ class VolumeCredentialService {
     if ((await dao.countByVolume(volumeId)) >= maxCredentials) {
       throw new BadRequestError(`Maximum ${maxCredentials} credentials allowed per bucket.`);
     }
-    const trimmedName = typeof name === 'string' ? name.trim() : '';
-    if (!trimmedName) throw new BadRequestError('name is required');
-    if (trimmedName.length > 100) throw new BadRequestError('name must be at most 100 characters');
+    const trimmedName = VolumeCredentialService.resolveName(name);
     const readOnlyFlag = VolumeCredentialService.readFlag(readOnly);
-    const defaultDays = this.deps.config.getDefaultCredentialExpiryDays();
-    const maxDays = this.deps.config.getMaxCredentialExpiryDays();
-    let effectiveDays = defaultDays;
-    if (expiresInDays !== undefined && expiresInDays !== null) {
-      let numeric: unknown = expiresInDays;
-      if (typeof expiresInDays === 'string') {
-        const trimmed = expiresInDays.trim();
-        if (!/^\d+$/.test(trimmed)) throw new BadRequestError('expiresInDays must be a positive integer');
-        numeric = Number(trimmed);
-      }
-      if (!Number.isSafeInteger(numeric) || (numeric as number) < 1) {
-        throw new BadRequestError('expiresInDays must be a positive integer');
-      }
-      const days = numeric as number;
-      if (days > maxDays) throw new BadRequestError(`Credential expiry cannot exceed ${maxDays} days.`);
-      effectiveDays = days;
-    }
+    const effectiveDays = this.resolveExpiryDays(expiresInDays, this.deps.config.getMaxCredentialExpiryDays());
     const password = DavCredentialUtil.generatePassword();
     const passwordHash = await DavCredentialUtil.hashPassword(password);
     const expiresAt = TimestampUtil.addDays(TimestampUtil.getCurrentUnixTimestampInSeconds(), effectiveDays);
-    for (let attempt = 0; attempt < 5; attempt += 1) {
+    // The generated username has a random component, so a collision is unlikely
+    // — but "unlikely" is not "impossible" and usernames are globally unique, so
+    // a collision must be retried rather than surfaced to the user. A unique
+    // violation from `create` is the same case observed one step later, after a
+    // concurrent writer beat the pre-check.
+    for (let attempt = 0; attempt < MAX_USERNAME_GENERATION_ATTEMPTS; attempt += 1) {
       const username = DavCredentialUtil.generateUsername(volumeName);
       if (await dao.usernameExists(username)) continue;
       try {

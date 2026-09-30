@@ -261,10 +261,6 @@ importers:
         version: 6.0.3
 
   packages/backend-runtime:
-    dependencies:
-      '@durable-dav/shared':
-        specifier: workspace:*
-        version: link:../shared
     devDependencies:
       '@types/node':
         specifier: 26.6.2
@@ -300,9 +296,6 @@ importers:
 
   packages/dav-store:
     dependencies:
-      '@durable-dav/backend-errors':
-        specifier: workspace:*
-        version: link:../backend-errors
       '@durable-dav/shared':
         specifier: workspace:*
         version: link:../shared
@@ -331,12 +324,6 @@ importers:
 
   packages/webdav:
     dependencies:
-      '@durable-dav/backend-errors':
-        specifier: workspace:*
-        version: link:../backend-errors
-      '@durable-dav/shared':
-        specifier: workspace:*
-        version: link:../shared
       '@xmldom/xmldom':
         specifier: ^0.9.12
         version: 0.9.12

@@ -61,44 +61,6 @@ class MiddlewareHandlers {
   public static userAuthentication(): (c: RequestContext, next: Next) => Promise<Response | void> {
     return userAuthenticationHandler;
   }
-
-  /**
-   * The authenticated caller's identity, or an answered 401.
-   *
-   * Both fields come from the one resolution `/user/*` middleware already did —
-   * `VolumeRoutes` used to call `getAuthenticatedUserEmail` a *second* time on
-   * five handlers, two full passes per request, each potentially a JWKS resolve
-   * or `ctx.access.getIdentity()` round trip.
-   */
-  public static async requireUser(c: RequestContext): Promise<Response | { email: string; userId: string | null }> {
-    try {
-      const existing = c.get('AuthenticatedUserEmailAddress') as string | undefined;
-      if (existing) {
-        return { email: existing, userId: (c.get('AuthenticatedUserId')) ?? null };
-      }
-      const identity = await authenticateUserIdentity(c);
-      c.set('AuthenticatedUserEmailAddress', identity.email);
-      c.set('AuthenticatedUserId', identity.userId ?? undefined);
-      return identity;
-    } catch (error: unknown) {
-      if (error instanceof UnauthorizedError || error instanceof ForbiddenError) {
-        const message = error instanceof Error ? error.message : 'Unauthorized';
-        const type = error instanceof ForbiddenError ? 'Forbidden' : 'Unauthorized';
-        const status = error instanceof ForbiddenError ? 403 : 401;
-        return c.json({ Exception: { Type: type, Message: message } }, status as 401);
-      }
-      console.error('requireUser failed:', ErrorSanitizationUtil.sanitizeErrorForLogging(error));
-      return c.json(
-        {
-          Exception: {
-            Type: DefaultInternalServerError.getErrorType(),
-            Message: DefaultInternalServerError.getErrorMessage(),
-          },
-        },
-        500,
-      );
-    }
-  }
 }
 
 export { MiddlewareHandlers };

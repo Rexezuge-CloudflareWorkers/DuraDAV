@@ -5,19 +5,21 @@ import { normalizeVolumeKey } from '@durable-dav/webdav';
 // KV-backed read cache for DAV RPCs (Git `RepoReadCache` pattern).
 // D1/DO stay authoritative; KV is loss-tolerant. All keys use the canonical
 // lowercase volume key so `Foo/Bar` and `foo/bar` share one entry, matching
-// `DAV_VOLUME.getByName` sharding. PROPFIND snapshots live 120s (`davProp`
-// domain) and are invalidated on write; small file bodies live 300s
-// (`davFile` domain) keyed by volume+path; the per-owner volume *list*
-// snapshot lives 60s (`davMeta` domain) keyed by owner email. There is no
-// per-volume detail snapshot — `VolumeDetail` reads the row its ownership
-// guard already loaded.
+// `DAV_VOLUME.getByName` sharding. PROPFIND snapshots live in the `davProp`
+// domain and are invalidated on write; small file bodies live in the `davFile`
+// domain keyed by volume+path. Both are scaled together by
+// `DAV_CACHE_TTL_SECONDS` (see `contentTtls`). The per-owner volume *list*
+// snapshot is a third domain, `davMeta`, and is independent of that setting —
+// see `DavVolumeListCache`, which also explains why it is keyed on the account
+// id rather than the caller's address. There is no per-volume detail snapshot —
+// `VolumeDetail` reads the row its ownership guard already loaded.
 
 // Per-kind TTLs. `DAV_CACHE_TTL_SECONDS` scales the two content caches
-// together; the metadata snapshot is deliberately independent because it backs
-// the dashboard list, where staleness is user-visible.
+// together; the volume-list snapshot is deliberately independent (it lives in
+// `DavVolumeListCache`) because it backs the dashboard list, where staleness is
+// user-visible.
 const DEFAULT_PROP_TTL_SECONDS = 120;
 const DEFAULT_FILE_TTL_SECONDS = 300;
-const DAV_META_TTL_SECONDS = 60;
 
 /**
  * Resolve the configured content-cache TTLs.
@@ -82,16 +84,17 @@ function isFresh(request: Request, etag: string | null): boolean {
   return incoming ? incoming.split(',').some((part) => part.trim() === etag || part.trim() === '*') : false;
 }
 
+/**
+ * Client-facing `Cache-Control` for each cached shape.
+ *
+ * `max-age` is deliberately *shorter* than the KV TTL it mirrors
+ * (`contentTtls`): the origin controls revalidation, and a browser that
+ * heuristic-freshness-refreshes on a stale body is a smaller problem than one
+ * that holds a body past the window the origin declared.
+ */
 function cacheControlFor(kind: string): string {
   if (kind === 'file') return 'private, max-age=300, must-revalidate';
   return kind === 'propfind' ? 'private, max-age=60, must-revalidate' : 'private, max-age=30, must-revalidate';
-}
-
-function withEtagHeaders(response: Response, etag: string, cacheControl: string): Response {
-  const headers = new Headers(response.headers);
-  headers.set('ETag', etag);
-  headers.set('Cache-Control', cacheControl);
-  return new Response(response.body, { status: response.status, headers });
 }
 
 function hashBody(value: string): string {
@@ -195,6 +198,10 @@ async function putCachedFile(
   // Every key must stay purgeable by volume prefix — see
   // `MAX_CACHEABLE_PATH_LENGTH`.
   if (!isCacheablePath(innerPath)) return;
+  // Redundant with the caller's own check today, and kept anyway: this is the
+  // only function that talks to a KV namespace, so it is the right place to
+  // enforce the platform's value-size limit rather than trusting every future
+  // caller to have remembered it.
   if (bytes.byteLength > MAX_CACHED_FILE_BYTES) return;
   try {
     await cache.putJson(
@@ -234,18 +241,16 @@ async function invalidateVolumeCaches(cache: KvCache, owner: string, volume: str
 
 // The per-owner volume list lives in `DavVolumeListCache`: it is keyed on the
 // account id (migration 0004) rather than the caller's address, and the reason
-// is explained there.
+// is explained there. It owns its own TTL.
 export { getCachedVolumeList, invalidateVolumeListCache, putCachedVolumeList } from './DavVolumeListCache';
 
 export {
-  DAV_META_TTL_SECONDS,
   DEFAULT_PROP_TTL_SECONDS,
   DEFAULT_FILE_TTL_SECONDS,
   MAX_CACHED_FILE_BYTES,
   cacheKeyForVolume,
   isFresh,
   cacheControlFor,
-  withEtagHeaders,
   hashBody,
   etagForPropfind,
   getCachedPropfind,

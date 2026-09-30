@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { AppConfiguration } from '../packages/backend-runtime/src/config/AppConfiguration';
 import { EnvParser } from '../packages/backend-runtime/src/config/EnvParser';
-import { checkVolumeQuota, validateVolumePatch } from '../packages/backend-services/src/dav/VolumeCreatePolicy';
+import { checkVolumeQuota, parseVolumePatch } from '../packages/backend-services/src/dav/VolumeCreatePolicy';
 import { deserializeErrorBody, parseErrorPayload } from '../packages/backend-services/src/errors/ErrorDeserializationUtil';
 import { mapServiceError, toServiceStatus } from '../packages/backend-services/src/errors/ErrorMapper';
 import { BadRequestError, DatabaseError } from '../packages/backend-errors';
@@ -27,9 +27,9 @@ describe('AppConfiguration hardening', () => {
 
 describe('VolumeCreatePolicy hardening', () => {
   it('rejects overlong descriptions and non-boolean visibility', () => {
-    expect(() => validateVolumePatch({ description: 'x'.repeat(501) })).toThrow(/500/);
-    expect(() => validateVolumePatch({ isPrivate: 'yes' as never })).toThrow(/boolean/);
-    expect(() => validateVolumePatch({ description: 'ok', isPrivate: true })).not.toThrow();
+    expect(() => parseVolumePatch({ description: 'x'.repeat(501) })).toThrow(/500/);
+    expect(() => parseVolumePatch({ isPrivate: 'yes' })).toThrow(/boolean/);
+    expect(() => parseVolumePatch({ description: 'ok', isPrivate: true })).not.toThrow();
     expect(() => checkVolumeQuota(10, 10)).toThrow(/Maximum 10 volumes/);
   });
 });

@@ -14,7 +14,7 @@ Scope: Wrangler bindings, build output, env vars. Parent index: `../../../AGENTS
 
 ## Local-only (no default, not in `ConfigurationDefaults.ts`)
 
-`DEV_AUTH_EMAIL` — bypasses Cloudflare Access locally. `DEMO_MODE` — returns `DEMO_USER_EMAIL` without verification.
+`DEV_AUTH_EMAIL` — bypasses Cloudflare Access locally. `DEMO_MODE` — authenticates every request as `DEMO_USER_EMAIL`, falling back to the `demo@example.com` constant when that is unset or malformed. Both are read through `AppConfiguration` (`getDevAuthEmail`/`getDemoUserEmail`), not off `env` directly, so the empty-string-means-unset rule lives in one place.
 
 ## Optional vars (defaults in `ConfigurationDefaults.ts`)
 

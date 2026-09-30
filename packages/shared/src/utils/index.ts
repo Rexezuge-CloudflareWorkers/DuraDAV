@@ -5,3 +5,4 @@ export { DavCredentialUtil } from './DavCredentialUtil';
 export { canonicalizeLanguageTag } from './LanguageTag';
 export { isValidEmailFormat } from './EmailUtil';
 export { ErrorSanitizationUtil } from './ErrorSanitizationUtil';
+export { isMissingSchemaError } from './SqlSchemaError';

@@ -4,7 +4,7 @@ import { BaseRoute } from '@/endpoints/IBaseRoute';
 import type { ApiApp, ApiContext } from '@/types/ApiContext';
 import { davAuthForVolume } from '@/middleware/DavAuth';
 import { getVolumeStub } from '../doStubs';
-import { DAV_CLASS, SUPPORT_METHODS, applyCors } from '@durable-dav/webdav';
+import { DAV_CLASS, SUPPORT_METHODS, applyCors, stripSlashes } from '@durable-dav/webdav';
 import { contentTtls, invalidateVolumeCaches, invalidatesReadCache } from './DavReadCache';
 import { davHeaders, serveGet, servePropfind } from './DavReadServing';
 import { resolveDestination } from './davDestination';
@@ -28,40 +28,30 @@ function ttlsOf(c: DavContext): { prop: number; file: number } {
   return contentTtls(AppConfiguration.fromEnv(c.env).getDavCacheTtlSeconds());
 }
 
-function isDavMethod(method: string): boolean {
-  return SUPPORT_METHODS.includes(method);
-}
-
 function needsWrite(method: string): boolean {
   return !['GET', 'HEAD', 'OPTIONS', 'PROPFIND'].includes(method);
 }
 
-function stripSlashes(value: string): string {
-  let start = 0;
-  let end = value.length;
-  while (start < end && value[start] === '/') start += 1;
-  while (end > start && value[end - 1] === '/') end -= 1;
-  return value.slice(start, end);
-}
-
 /**
- * 200/304 response builder for cached DAV reads.
+ * `405` for a volume path reached with a method the DAV surface does not
+ * implement.
  *
- * Single place for the header set, so the 200 and 304 arms cannot drift.
- * Previously the 304 arm set only `ETag`, omitting the `Cache-Control` the
- * 200 arm sent, and the 200 header block was written three separate times
- * with subtly different field sets.
+ * The `Allow`/`DAV` pair is what tells a client this is a WebDAV resource and
+ * which verbs it answers, so it is built in one place rather than at each of
+ * the two call sites that need it.
  */
-
-/**
-200/304 for a body already materialised from the DO.
-*/
+function methodNotAllowed(c: DavContext): Response {
+  return cors(c, new Response('Method Not Allowed', { status: 405, headers: { Allow: SUPPORT_METHODS.join(', '), DAV: DAV_CLASS } }));
+}
 
 async function handleDav(c: DavContext, owner: string, volume: string, inner: string): Promise<Response> {
   const method = c.req.method;
-  if (!isDavMethod(method)) {
-    return cors(c, new Response('Method Not Allowed', { status: 405, headers: { Allow: SUPPORT_METHODS.join(', '), DAV: DAV_CLASS } }));
-  }
+  // No method guard here. `handleDav` is only reachable from
+  // `app.on(SUPPORT_METHODS, …)`, so the Fetch router has already restricted
+  // the verb — a per-request re-check could only ever fail for a method the
+  // router would have sent to the catch-all `methodNotAllowed` instead. That
+  // catch-all is the reachable 405; the copy that used to live here was dead
+  // code that made the route look like it validated its own methods.
   // `OPTIONS` is a capability probe, not an access to resource content. Many
   // DAV clients (and Windows/Office discovery) send it unauthenticated to learn
   // the compliance class; answering 401 on a private volume broke discovery
@@ -152,11 +142,8 @@ function registerDavRoutes(app: App): void {
   });
 
   // Terminal catch-all. Without it, a non-DAV method on a volume path matched
-  // no route and fell through to Hono's default 404, so the 405 the code
-  // already contained was unreachable and clients saw "not found" for a
-  // resource that plainly exists.
-  const methodNotAllowed = (c: DavContext): Response =>
-    cors(c, new Response('Method Not Allowed', { status: 405, headers: { Allow: SUPPORT_METHODS.join(', '), DAV: DAV_CLASS } }));
+  // no route and fell through to Hono's default 404, so clients saw "not
+  // found" for a resource that plainly exists.
   app.all('/:owner/:volume', methodNotAllowed as never);
   app.all('/:owner/:volume/*', methodNotAllowed as never);
 }

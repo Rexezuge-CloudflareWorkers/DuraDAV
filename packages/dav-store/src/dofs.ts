@@ -33,15 +33,22 @@ function createDofsFs(ctx: unknown, env: unknown, options: DofsOptions = {}): Do
   return new Fs(ctx as ConstructorParameters<typeof Fs>[0], env as ConstructorParameters<typeof Fs>[1], { chunkSize: validated });
 }
 
+/**
+ * Apply the volume's device quota.
+ *
+ * Deliberately does **not** swallow: `dofs.setDeviceSize` has no "already set"
+ * error, so a throw here means the quota was not applied and will stay
+ * unenforced. This function used to catch and ignore on the assumption that
+ * the only possible error was ENOSPC, which meant the caller's
+ * `ensureSize()` — the one place that logs "volume quota may be unenforced" —
+ * never saw a failure. Let it propagate and let the caller decide; the caller
+ * is per-isolate and runs once, so a logged failure is cheap.
+ */
 function setDofsDeviceSize(dofs: DofsFs, bytes: number): void {
-  try {
-    dofs.setDeviceSize(bytes);
-  } catch {
-    // ENOSPC / already set — write path surfaces real errors.
-  }
+  dofs.setDeviceSize(bytes);
 }
 
 export { createDofsFs, setDofsDeviceSize, validateChunkSize, DEFAULT_CHUNK_SIZE, MAX_CHUNK_SIZE };
-export type { DofsFs, DofsContext, DofsEnvironment, DofsOptions,  };
+export type { DofsFs, DofsContext, DofsEnvironment, DofsOptions };
 
-export {type DirEntry} from 'dofs';
+export { type DirEntry } from 'dofs';

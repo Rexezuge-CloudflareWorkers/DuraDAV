@@ -1,4 +1,5 @@
 import type { DeadProperty } from '@durable-dav/webdav';
+import { isMissingSchemaError } from '@durable-dav/shared/utils';
 
 type SqlRow = Record<string, unknown>;
 
@@ -7,13 +8,18 @@ type DurableSqlStorage = {
 };
 
 function ensureDavSchema(sql: DurableSqlStorage): void {
+  // `content_language` and `displayname` were declared here and never written
+  // or read: `displayname` is derived from the path in `DavRepository`, and
+  // `contentLanguage` was a permanently-`undefined` field, which made
+  // `getcontentlanguage` absent from every PROPFIND while the schema claimed to
+  // store it. Both are dropped. A `CREATE TABLE IF NOT EXISTS` does not
+  // migrate an existing DO, so an already-provisioned volume keeps the two
+  // nullable columns until it is deleted — harmless, since nothing selects them.
   sql.exec(`
     CREATE TABLE IF NOT EXISTS dav_nodes (
       path TEXT PRIMARY KEY,
       is_collection INTEGER NOT NULL DEFAULT 0,
       content_type TEXT,
-      content_language TEXT,
-      displayname TEXT,
       etag TEXT,
       mtime INTEGER NOT NULL,
       crtime INTEGER NOT NULL
@@ -119,18 +125,31 @@ function renameNodeCascade(sql: DurableSqlStorage, from: string, to: string): vo
   }
 }
 
+/**
+ * Dead properties for a path.
+ *
+ * Only a *missing table* degrades to `[]` — that is the one failure a
+ * pre-schema volume can produce, and answering "no dead properties" is exactly
+ * right there. Every other SQL error propagates: swallowing them meant a
+ * corrupt, busy, or truncated database was reported to the client as "this
+ * resource has no dead properties", so a `PROPPATCH` that had already written
+ * the row would 404 that property in the very next PROPFIND with nothing
+ * logged. A silent data-loss report is worse than a 500.
+ */
 function getDeadProperties(sql: DurableSqlStorage, path: string): DeadProperty[] {
+  let rows: SqlRow[];
   try {
-    const rows = sql.exec(`SELECT namespace_uri, local_name, prefix, value_xml FROM dav_props WHERE path = ?`, path).toArray();
-    return rows.map((row) => ({
-      namespaceURI: stringField(row, 'namespace_uri', ''),
-      localName: stringField(row, 'local_name', ''),
-      prefix: nullableStringField(row, 'prefix') ?? null,
-      valueXml: stringField(row, 'value_xml', ''),
-    }));
-  } catch {
-    return [];
+    rows = sql.exec(`SELECT namespace_uri, local_name, prefix, value_xml FROM dav_props WHERE path = ?`, path).toArray();
+  } catch (error) {
+    if (isMissingSchemaError(error)) return [];
+    throw error;
   }
+  return rows.map((row) => ({
+    namespaceURI: stringField(row, 'namespace_uri', ''),
+    localName: stringField(row, 'local_name', ''),
+    prefix: nullableStringField(row, 'prefix') ?? null,
+    valueXml: stringField(row, 'value_xml', ''),
+  }));
 }
 
 export { ensureDavSchema, upsertNode, deleteNodeCascade, renameNodeCascade, getDeadProperties };

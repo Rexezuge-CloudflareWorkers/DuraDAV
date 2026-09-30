@@ -33,13 +33,6 @@ export interface UserRow {
   updated_at: number | null;
 }
 
-/**
- * Address a row signs in with, preferring the mutable one.
- */
-function loginEmailOf(row: UserRow | null): string | null {
-  return row ? (row.current_email ?? row.email).toLowerCase() : null;
-}
-
 class UserDAO extends BaseDAO {
   constructor(database: D1Queryable) {
     super(database);
@@ -181,4 +174,4 @@ class UserDAO extends BaseDAO {
   }
 }
 
-export { UserDAO, loginEmailOf };
+export { UserDAO };
