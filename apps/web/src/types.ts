@@ -43,6 +43,7 @@ export interface BucketCredential {
   createdAt: number;
   expiresAt: number;
   lastUsedAt: number | null;
+  readOnly: boolean;
 }
 
 export interface CreatedBucketCredential {
@@ -53,6 +54,7 @@ export interface CreatedBucketCredential {
   expiresAt: number;
   passwordPrefix: string;
   passwordLastFour: string;
+  readOnly: boolean;
 }
 
 export interface UserProfile {

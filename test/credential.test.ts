@@ -16,6 +16,7 @@ function createCredentialFakeDb() {
       created_at: number;
       expires_at: number;
       last_used_at: number | null;
+      read_only: number;
     }>,
   };
   function statement(query: string, params: unknown[]) {
@@ -53,8 +54,9 @@ function createCredentialFakeDb() {
       },
       run(): Promise<{ success: boolean; meta?: { changes?: number } }> {
         if (q.startsWith('INSERT INTO dav_credentials')) {
-          const [credential_id, volume_id, username, password_hash, name, password_prefix, password_last_four, created_at, expires_at] =
-            params as Array<string | number>;
+          const [credential_id, volume_id, username, password_hash, name, password_prefix, password_last_four, created_at, expires_at, read_only] = params as Array<
+            string | number
+          >;
           if (state.rows.some((r) => r.username === username)) {
             throw new Error('UNIQUE constraint failed: dav_credentials.username');
           }
@@ -69,8 +71,18 @@ function createCredentialFakeDb() {
             created_at: created_at as number,
             expires_at: expires_at as number,
             last_used_at: null,
+            read_only: (read_only as number | undefined) ?? 0,
           });
           return Promise.resolve({ success: true, meta: { changes: 1 } });
+        }
+        if (q.startsWith('UPDATE dav_credentials SET read_only')) {
+          // Bind order is (read_only, credential_id, volume_id): the volume
+          // scoping is what stops a credential id from another bucket being
+          // flipped, so the fake has to honour it the way the WHERE does.
+          const [flag, credentialId, volumeId] = params as Array<string | number>;
+          const row = state.rows.find((r) => r.credential_id === credentialId && r.volume_id === volumeId);
+          if (row) row.read_only = Number(flag);
+          return Promise.resolve({ success: true, meta: { changes: row ? 1 : 0 } });
         }
         if (q.startsWith('UPDATE dav_credentials SET last_used_at')) {
           const row = state.rows.find((r) => r.credential_id === params[1]);
@@ -140,5 +152,75 @@ describe('VolumeCredentialService lifecycle', () => {
     const svc = new VolumeCredentialService({ DB: db, MAX_CREDENTIALS_PER_VOLUME: '1' });
     await svc.createCredential('vol-1', 'photos', 'first');
     await expect(svc.createCredential('vol-1', 'photos', 'second')).rejects.toThrow(/Maximum 1 credentials/);
+  });
+});
+
+describe('VolumeCredentialService read-only flag', () => {
+  it('defaults to full access when the caller sends no flag', async () => {
+    // The backwards-compatibility contract: an existing client posting the old
+    // body shape must keep a working write credential, not silently lose it.
+    const { db } = createCredentialFakeDb();
+    const svc = new VolumeCredentialService({ DB: db });
+    expect((await svc.createCredential('vol-1', 'photos', 'laptop')).metadata.readOnly).toBe(false);
+  });
+
+  it('persists a read-only flag when one is requested', async () => {
+    const { db, state } = createCredentialFakeDb();
+    const svc = new VolumeCredentialService({ DB: db });
+    const created = await svc.createCredential('vol-1', 'photos', 'backup', undefined, true);
+    expect(created.metadata.readOnly).toBe(true);
+    expect(state.rows[0]?.read_only).toBe(1);
+  });
+
+  it('rejects a non-boolean flag rather than defaulting it', async () => {
+    // `"true"`, `1`, and `"false"` all mean the caller tried to set this. Quietly
+    // defaulting any of them to full access is the one outcome that must not
+    // happen by accident.
+    const { db } = createCredentialFakeDb();
+    const svc = new VolumeCredentialService({ DB: db });
+    for (const bad of ['true', 1, 0, 'yes', {}]) {
+      await expect(svc.createCredential('vol-1', 'photos', 'x', undefined, bad)).rejects.toThrow('readOnly must be a boolean');
+    }
+  });
+
+  it('flips a credential in both directions without touching its secret', async () => {
+    const { db, state } = createCredentialFakeDb();
+    const svc = new VolumeCredentialService({ DB: db });
+    const created = await svc.createCredential('vol-1', 'photos', 'backup');
+    const hash = state.rows[0]?.password_hash;
+    const username = state.rows[0]?.username;
+
+    expect((await svc.setCredentialReadOnly('vol-1', created.metadata.credentialId, true)).readOnly).toBe(true);
+    expect(state.rows[0]?.read_only).toBe(1);
+    expect((await svc.setCredentialReadOnly('vol-1', created.metadata.credentialId, false)).readOnly).toBe(false);
+    expect(state.rows[0]?.read_only).toBe(0);
+    // The toggle is a policy statement, not a credential rotation: a secret
+    // must not be able to change underneath a client that already holds it.
+    expect(state.rows[0]?.password_hash).toBe(hash);
+    expect(state.rows[0]?.username).toBe(username);
+  });
+
+  it('refuses to flip a credential that belongs to another bucket', async () => {
+    // The UPDATE is scoped by volume id, so a credential id from elsewhere is
+    // a silent no-op. Reporting success there would tell the caller the flag
+    // was applied when it was not.
+    const { db, state } = createCredentialFakeDb();
+    const svc = new VolumeCredentialService({ DB: db });
+    const created = await svc.createCredential('vol-1', 'photos', 'backup');
+    await expect(svc.setCredentialReadOnly('vol-other', created.metadata.credentialId, true)).rejects.toThrow('Credential not found');
+    expect(state.rows[0]?.read_only).toBe(0);
+  });
+
+  it('reports a missing credential as not found rather than succeeding', async () => {
+    const { db } = createCredentialFakeDb();
+    const svc = new VolumeCredentialService({ DB: db });
+    await expect(svc.setCredentialReadOnly('vol-1', 'cred_missing', true)).rejects.toThrow('Credential not found');
+  });
+
+  it('rejects a non-boolean flip', async () => {
+    const { db } = createCredentialFakeDb();
+    const svc = new VolumeCredentialService({ DB: db });
+    const created = await svc.createCredential('vol-1', 'photos', 'backup');
+    await expect(svc.setCredentialReadOnly('vol-1', created.metadata.credentialId, 'yes')).rejects.toThrow('readOnly must be a boolean');
   });
 });

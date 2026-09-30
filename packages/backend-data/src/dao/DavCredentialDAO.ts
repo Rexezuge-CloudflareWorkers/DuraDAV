@@ -16,6 +16,7 @@ class DavCredentialDAO extends BaseDAO {
     passwordPrefix: string,
     passwordLastFour: string,
     expiresAt: number,
+    readOnly = false,
   ): Promise<DavCredentialMetadata> {
     const now = TimestampUtil.getCurrentUnixTimestampInSeconds();
     const credentialId = UUIDUtil.getRandomUUID();
@@ -24,10 +25,10 @@ class DavCredentialDAO extends BaseDAO {
         this.database
           .prepare(
             `INSERT INTO dav_credentials
-              (credential_id, volume_id, username, password_hash, name, password_prefix, password_last_four, created_at, expires_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+              (credential_id, volume_id, username, password_hash, name, password_prefix, password_last_four, created_at, expires_at, read_only)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           )
-          .bind(credentialId, volumeId, username, passwordHash, name, passwordPrefix, passwordLastFour, now, expiresAt)
+          .bind(credentialId, volumeId, username, passwordHash, name, passwordPrefix, passwordLastFour, now, expiresAt, readOnly ? 1 : 0)
           .run(),
       'create dav credential',
     );
@@ -48,6 +49,10 @@ class DavCredentialDAO extends BaseDAO {
    * The hash is intentionally part of the return value — it is the input to
    * verification, and returning a metadata projection without it would force a
    * second query on the auth hot path.
+   *
+   * `read_only` is named here for the same reason: the auth decision that reads
+   * it is made on this one query, and a projection that omitted the column would
+   * coerce to `false` and quietly hand out write access.
    */
   public async getActiveByUsername(
     username: string,
@@ -55,7 +60,7 @@ class DavCredentialDAO extends BaseDAO {
     const now = TimestampUtil.getCurrentUnixTimestampInSeconds();
     const row = await this.database
       .prepare(
-        `SELECT credential_id, volume_id, username, password_hash, name, password_prefix, password_last_four, created_at, expires_at, last_used_at
+        `SELECT credential_id, volume_id, username, password_hash, name, password_prefix, password_last_four, created_at, expires_at, last_used_at, read_only
          FROM dav_credentials
          WHERE username = ? AND expires_at > ?
          LIMIT 1`,
@@ -70,7 +75,7 @@ class DavCredentialDAO extends BaseDAO {
   public async getById(credentialId: string): Promise<DavCredentialMetadata | undefined> {
     const row = await this.database
       .prepare(
-        `SELECT credential_id, volume_id, username, password_hash, name, password_prefix, password_last_four, created_at, expires_at, last_used_at
+        `SELECT credential_id, volume_id, username, password_hash, name, password_prefix, password_last_four, created_at, expires_at, last_used_at, read_only
          FROM dav_credentials WHERE credential_id = ? LIMIT 1`,
       )
       .bind(credentialId)
@@ -81,7 +86,7 @@ class DavCredentialDAO extends BaseDAO {
   public async listByVolume(volumeId: string): Promise<DavCredentialMetadata[]> {
     const result = await this.database
       .prepare(
-        `SELECT credential_id, volume_id, username, password_hash, name, password_prefix, password_last_four, created_at, expires_at, last_used_at
+        `SELECT credential_id, volume_id, username, password_hash, name, password_prefix, password_last_four, created_at, expires_at, last_used_at, read_only
          FROM dav_credentials WHERE volume_id = ? ORDER BY created_at DESC`,
       )
       .bind(volumeId)
@@ -120,6 +125,25 @@ class DavCredentialDAO extends BaseDAO {
           .bind(passwordHash, credentialId)
           .run(),
       'update dav credential password hash',
+    );
+  }
+
+  /**
+   * Flip a credential's read-only flag.
+   *
+   * Scoped to the volume as well as the credential id, so a credential id
+   * guessed from another bucket cannot be flipped. Nothing else about the
+   * credential changes — in particular the password is untouched, so this
+   * cannot be used to smuggle a new secret past the copy-once reveal.
+   */
+  public async updateReadOnly(credentialId: string, volumeId: string, readOnly: boolean): Promise<void> {
+    await this.withRetry(
+      () =>
+        this.database
+          .prepare('UPDATE dav_credentials SET read_only = ? WHERE credential_id = ? AND volume_id = ?')
+          .bind(readOnly ? 1 : 0, credentialId, volumeId)
+          .run(),
+      'update dav credential read-only flag',
     );
   }
 
@@ -164,6 +188,10 @@ class DavCredentialDAO extends BaseDAO {
       createdAt: row.created_at,
       expiresAt: row.expires_at,
       lastUsedAt: row.last_used_at,
+      // A row written before migration 0005 has no `read_only` at all, and D1
+      // hands the field back as `undefined`; both that and a 0 coerce to
+      // `false`, which is the direction that preserves existing behaviour.
+      readOnly: Number(row.read_only) === 1,
     };
   }
 }

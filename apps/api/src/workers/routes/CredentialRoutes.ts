@@ -19,6 +19,7 @@ class ListCredentials extends VolumeScopedRoute {
         createdAt: cred.createdAt,
         expiresAt: cred.expiresAt,
         lastUsedAt: cred.lastUsedAt,
+        readOnly: cred.readOnly,
       })),
     });
   }
@@ -29,12 +30,14 @@ class CreateCredential extends VolumeScopedRoute {
     // Routed through `BaseRoute.readJson` so malformed JSON and an oversize
     // body are distinguished, and so the body is size-capped like every other
     // JSON endpoint.
-    const { malformed, oversized, body } = await BaseRoute.readJson<{ name?: string; expiresInDays?: unknown }>(c);
+    const { malformed, oversized, body } = await BaseRoute.readJson<{ name?: string; expiresInDays?: unknown; readOnly?: unknown }>(c);
     if (oversized) return c.json({ Exception: { Type: 'PayloadTooLarge', Message: 'Payload too large' } }, 413);
     if (malformed || !body.name) {
       return c.json({ Exception: { Type: 'BadRequest', Message: malformed ? 'Invalid JSON body' : 'name is required' } }, 400);
     }
-    const created = await scope.get(Tokens.VolumeCredentialService).createCredential(row.id, row.name, body.name, body.expiresInDays);
+    const created = await scope
+      .get(Tokens.VolumeCredentialService)
+      .createCredential(row.id, row.name, body.name, body.expiresInDays, body.readOnly);
     return c.json(
       {
         credentialId: created.metadata.credentialId,
@@ -45,9 +48,40 @@ class CreateCredential extends VolumeScopedRoute {
         expiresAt: created.metadata.expiresAt,
         passwordPrefix: created.metadata.passwordPrefix,
         passwordLastFour: created.metadata.passwordLastFour,
+        // Echoed so the caller sees the flag that was actually applied — a
+        // rejected value is a 400, but a default they did not send is not.
+        readOnly: created.metadata.readOnly,
       },
       201,
     );
+  }
+}
+
+/**
+ * Flip a credential between read-only and full access.
+ *
+ * Exists because a read-only credential is otherwise permanent: the flag is
+ * chosen at creation, and a client that is handed one cannot undo it. Both
+ * directions are equally valid — promoting a read-only mount to full access
+ * after the owner has decided the agent is trusted is the common case.
+ */
+class UpdateCredential extends VolumeScopedRoute {
+  protected async run(c: ApiContext, { scope, row }: VolumeRequestContext): Promise<Response> {
+    const { malformed, oversized, body } = await BaseRoute.readJson<{ readOnly?: unknown }>(c);
+    if (oversized) return c.json({ Exception: { Type: 'PayloadTooLarge', Message: 'Payload too large' } }, 413);
+    if (malformed || typeof body.readOnly !== 'boolean') {
+      return c.json({ Exception: { Type: 'BadRequest', Message: malformed ? 'Invalid JSON body' : 'readOnly must be a boolean' } }, 400);
+    }
+    const updated = await scope
+      .get(Tokens.VolumeCredentialService)
+      .setCredentialReadOnly(row.id, c.req.param('id') ?? '', body.readOnly);
+    return c.json({
+      credentialId: updated.credentialId,
+      username: updated.username,
+      name: updated.name,
+      expiresAt: updated.expiresAt,
+      readOnly: updated.readOnly,
+    });
   }
 }
 
@@ -62,9 +96,11 @@ function registerCredentialRoutes(app: App): void {
   const base = '/user/volumes/:owner/:volume/credentials';
   const list = new ListCredentials();
   const create = new CreateCredential();
+  const update = new UpdateCredential();
   const remove = new DeleteCredential();
   app.get(base, (c) => list.handle(c));
   app.post(base, (c) => create.handle(c));
+  app.patch(`${base}/:id`, (c) => update.handle(c));
   app.delete(`${base}/:id`, (c) => remove.handle(c));
 }
 

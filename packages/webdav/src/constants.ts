@@ -92,4 +92,26 @@ function createdResponse(resourceHref: string, body: BodyInit | null = '', heade
   return new Response(body, { status: 201, headers: responseHeaders });
 }
 
-export { DAV_CLASS, SUPPORT_METHODS, CORS_ALLOW_HEADERS, CORS_EXPOSE_HEADERS, applyCors, createdResponse, allowedOrigins };
+/**
+ * An RFC 4918 §16 `DAV:error` body.
+ *
+ * The DAV protocol has a defined way to say *why* a request failed — a status
+ * element naming a precondition or postcondition code — and a client that reads
+ * it can tell "you are not allowed to do this" from "this server is broken".
+ * A bare `new Response('Forbidden', { status: 403 })` throws that away.
+ *
+ * `condition` is a local name inside the `DAV:` namespace, emitted only when
+ * given: RFC 4918 requires a `responsedescription` sibling, but inventing a
+ * human-readable string here would mean a second set of translated messages on
+ * a path that has none, so the wire body stays a bare code.
+ */
+function davErrorResponse(status: number, condition?: string, headers: HeadersInit = {}): Response {
+  const body = condition
+    ? `<?xml version="1.0" encoding="utf-8"?>\n<D:error xmlns:D="DAV:"><D:${condition}/></D:error>`
+    : '<?xml version="1.0" encoding="utf-8"?>\n<D:error xmlns:D="DAV:"/>';
+  const responseHeaders = new Headers(headers);
+  responseHeaders.set('Content-Type', 'application/xml; charset=utf-8');
+  return new Response(body, { status, headers: responseHeaders });
+}
+
+export { DAV_CLASS, SUPPORT_METHODS, CORS_ALLOW_HEADERS, CORS_EXPOSE_HEADERS, applyCors, createdResponse, allowedOrigins, davErrorResponse };

@@ -1,5 +1,5 @@
 import type { BucketCredential, CreatedBucketCredential } from '../types';
-import { apiDelete, apiGet, apiPost } from '../lib/api';
+import { apiDelete, apiGet, apiPatch, apiPost } from '../lib/api';
 
 function credentialBase(owner: string, volume: string): string {
   return `/user/volumes/${encodeURIComponent(owner)}/${encodeURIComponent(volume)}/credentials`;
@@ -15,8 +15,13 @@ export async function createBucketCredential(
   volume: string,
   name: string,
   expiresInDays?: number,
+  readOnly?: boolean,
 ): Promise<CreatedBucketCredential> {
-  return apiPost<CreatedBucketCredential>(credentialBase(owner, volume), { name, expiresInDays });
+  return apiPost<CreatedBucketCredential>(credentialBase(owner, volume), { name, expiresInDays, readOnly });
+}
+
+export async function setBucketCredentialReadOnly(owner: string, volume: string, credentialId: string, readOnly: boolean): Promise<void> {
+  await apiPatch<{ credentialId: string; readOnly: boolean }>(`${credentialBase(owner, volume)}/${encodeURIComponent(credentialId)}`, { readOnly });
 }
 
 export async function revokeBucketCredential(owner: string, volume: string, credentialId: string): Promise<void> {

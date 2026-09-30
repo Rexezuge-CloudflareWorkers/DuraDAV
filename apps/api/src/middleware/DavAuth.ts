@@ -2,6 +2,7 @@ import type { Context } from 'hono';
 import { Tokens } from '@durable-dav/backend-services/composition';
 import type { DavVolumeRow } from '@durable-dav/backend-data/dao';
 import { DavCredentialUtil } from '@durable-dav/shared/utils';
+import { davErrorResponse } from '@durable-dav/webdav';
 import type { DavHrefPrefixMode } from '@durable-dav/shared/constants';
 import { readDavHrefPrefixMode } from '@durable-dav/shared/constants';
 import { DatabaseError } from '@durable-dav/backend-errors';
@@ -87,6 +88,27 @@ function unauthorizedDav(): Response {
 }
 
 /**
+ * A write attempted with a read-only credential (migration 0005).
+ *
+ * 403, not 401: the credential authenticated fine — the operation is what is
+ * refused, and a client that is told to authenticate again will re-prompt for
+ * a password it already has, then fail again, forever. The `DAV:error` body
+ * gives it the RFC 4918 §16 shape and a code to branch on.
+ *
+ * Deliberately carries no `WWW-Authenticate`: that header is the trigger for
+ * the re-prompt loop, and repeating it on a 403 is what turns a one-line
+ * refusal into a client-side stall.
+ *
+ * `<D:cannot-modify-protected-property/>` is the closest registered
+ * precondition for "this resource refuses modification"; a server is free to
+ * define its own condition element in its own namespace, but a registered code
+ * is the one every existing client already knows how to read.
+ */
+function readOnlyCredentialDav(): Response {
+  return davErrorResponse(403, 'cannot-modify-protected-property');
+}
+
+/**
  * The row's href mode, coerced in one place.
  *
  * `href_prefix_mode` is TEXT and added by migration 0003, so a row written
@@ -168,6 +190,15 @@ async function davAuthForVolumeInner(
     }));
     if (!ok) return unauthorizedDav();
     if (credential.volumeId !== volume.id) return unauthorizedDav();
+    // Read-only credentials (migration 0005) get exactly the read methods.
+    // `needWrite` is true for everything that changes content or locks, so this
+    // covers PUT/DELETE/MKCOL/COPY/MOVE/PROPPATCH and LOCK — and therefore also
+    // UNLOCK, which has nothing to act on once LOCK is refused.
+    //
+    // Placed before the rehash and the `last_used_at` touch below so a refused
+    // attempt costs no D1 write. The legacy digest is simply upgraded on the
+    // next successful read instead.
+    if (needWrite && credential.readOnly) return readOnlyCredentialDav();
     // Opportunistic upgrade: a credential still on the legacy unsalted
     // SHA-256 digest is re-hashed the first time it is used, so the migration
     // completes without a password-reset prompt and without a batch job.
