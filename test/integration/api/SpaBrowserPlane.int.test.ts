@@ -176,6 +176,154 @@ describe('SPA bucket browser ⇄ WebDAV addressing contract', () => {
 });
 
 /**
+ * Paged listing, through the real browser plane and the real DO.
+ *
+ * A paged body is *wrong* in a way an unpaged one is not: a missing entry or a
+ * repeated one across two pages is invisible when only one page is inspected,
+ * which is exactly the failure the pager would ship with. So these tests
+ * compare adjacent pages against the unpaged listing rather than asserting each
+ * page's contents in isolation.
+ */
+describe('browser-plane paged listing', () => {
+  /**
+  Enough entries to span several pages at the smallest page size.
+  */
+  const ENTRY_COUNT = 12;
+  const PAGE_SIZE = 5;
+  const FOLDER = 'paged';
+
+  /**
+  Paged PROPFIND with paging headers, parsed by the real SPA parser.
+  */
+  async function listPage(innerPath: string, page: number, limit: number): Promise<{ entries: Array<{ path: string }>; total: number | null; servedPage: number | null; servedLimit: number | null }> {
+    const res = await api(`${filesUrl(innerPath)}?page=${page}&limit=${limit}`, {
+      method: 'PROPFIND',
+      headers: { Depth: '1', 'Content-Type': 'application/xml; charset=utf-8' },
+      body: PROPFIND_BODY,
+    });
+    expect(res.status).toBe(207);
+    return {
+      entries: parseMultistatus(await res.text(), innerPath, DAV_BASE),
+      total: readHeader(res, 'X-Dav-Page-Count'),
+      servedPage: readHeader(res, 'X-Dav-Page'),
+      servedLimit: readHeader(res, 'X-Dav-Page-Limit'),
+    };
+  }
+
+  beforeAll(async () => {
+    expect((await api(filesUrl(FOLDER), { method: 'MKCOL' })).status).toBe(201);
+    for (let i = 0; i < ENTRY_COUNT; i += 1) {
+      const name = `entry-${String(i).padStart(2, '0')}.txt`;
+      const res = await api(filesUrl(`${FOLDER}/${name}`), { method: 'PUT', headers: { 'Content-Type': 'text/plain' }, body: name });
+      expect(res.status, name).toBe(201);
+    }
+  });
+
+  it('reports the collection size and the page it served', async () => {
+    const page = await listPage(FOLDER, 1, PAGE_SIZE);
+    expect(page.total).toBe(ENTRY_COUNT);
+    expect(page.servedPage).toBe(1);
+    expect(page.servedLimit).toBe(PAGE_SIZE);
+  });
+
+  it('returns only the requested page', async () => {
+    const page = await listPage(FOLDER, 1, PAGE_SIZE);
+    expect(page.entries).toHaveLength(PAGE_SIZE);
+  });
+
+  /**
+   * The load-bearing property. A non-deterministic ORDER BY would let SQLite
+   * return the same directory in a different order on two consecutive requests,
+   * which is how an entry ends up on two pages or on none. `dofs_files` carries
+   * `is_dir`, and the query orders by `is_dir DESC, name COLLATE NOCASE, name` —
+   * the trailing binary `name` is what makes the order total.
+   */
+  it('walks every entry exactly once across all pages', async () => {
+    const full = (await listDirectory(FOLDER)).map((e) => e.path).sort();
+    const paged: string[] = [];
+    for (let page = 1; page <= Math.ceil(ENTRY_COUNT / PAGE_SIZE); page += 1) {
+      paged.push(...(await listPage(FOLDER, page, PAGE_SIZE)).entries.map((e) => e.path));
+    }
+    expect(paged).toHaveLength(ENTRY_COUNT);
+    // Disjoint, and equal to the unpaged listing as a set.
+    expect(new Set(paged).size).toBe(ENTRY_COUNT);
+    expect([...paged].sort()).toEqual(full);
+  });
+
+  it('orders folders before files, matching the unpaged listing', async () => {
+    const full = (await listDirectory(FOLDER)).map((e) => e.path);
+    const paged: string[] = [];
+    for (let page = 1; page <= Math.ceil(ENTRY_COUNT / PAGE_SIZE); page += 1) {
+      paged.push(...(await listPage(FOLDER, page, PAGE_SIZE)).entries.map((e) => e.path));
+    }
+    // The paged order and the unpaged order are the same total order, so the
+    // browser's within-page re-sort is all that differs.
+    expect(paged).toEqual(full);
+  });
+
+  /**
+   * An out-of-range page must serve the last real page. Serving an empty list
+   * would be a *wrong* answer rather than an unhelpful one: `VolumeFileList`
+   * gates its "folder does not exist" state on `entries.length === 0`.
+   */
+  it('clamps a page past the end to the last real page instead of answering empty', async () => {
+    const page = await listPage(FOLDER, 99, PAGE_SIZE);
+    expect(page.servedPage).toBe(Math.ceil(ENTRY_COUNT / PAGE_SIZE));
+    expect(page.entries.length).toBeGreaterThan(0);
+  });
+
+  it('clamps an oversized limit so one request cannot ask for the whole collection', async () => {
+    const page = await listPage(FOLDER, 1, 100_000);
+    expect(page.servedLimit).toBe(250);
+    expect(page.entries.length).toBeLessThanOrEqual(250);
+  });
+
+  it('reports no paging headers when the caller did not ask to page', async () => {
+    // A native DAV client sends `Depth: 1` and must still receive every member
+    // (RFC 4918 §9.1). The absence of these headers is also what tells an older
+    // SPA that the listing it got is complete rather than one page of many.
+    const res = await api(filesUrl(FOLDER), {
+      method: 'PROPFIND',
+      headers: { Depth: '1', 'Content-Type': 'application/xml; charset=utf-8' },
+      body: PROPFIND_BODY,
+    });
+    expect(res.status).toBe(207);
+    expect(res.headers.get('X-Dav-Page-Count')).toBeNull();
+    expect(parseMultistatus(await res.text(), FOLDER, DAV_BASE)).toHaveLength(ENTRY_COUNT);
+  });
+
+  it('ignores a caller-set X-Dav-Page header unless the query string asked for it', async () => {
+    // The browser plane decides paging from `?page=`/`?limit=`; a hand-set
+    // header must not page a request that never opted in.
+    const res = await api(filesUrl(FOLDER), {
+      method: 'PROPFIND',
+      headers: { Depth: '1', 'Content-Type': 'application/xml; charset=utf-8', 'X-Dav-Page': '2', 'X-Dav-Page-Limit': '2' },
+      body: PROPFIND_BODY,
+    });
+    expect(res.status).toBe(207);
+    expect(res.headers.get('X-Dav-Page-Count')).toBeNull();
+    expect(parseMultistatus(await res.text(), FOLDER, DAV_BASE)).toHaveLength(ENTRY_COUNT);
+  });
+
+  it('keeps other query parameters, so paging cannot drop an unrelated one', async () => {
+    const res = await api(`${filesUrl(FOLDER)}?page=1&limit=${PAGE_SIZE}&backend=keepme`, {
+      method: 'PROPFIND',
+      headers: { Depth: '1', 'Content-Type': 'application/xml; charset=utf-8' },
+      body: PROPFIND_BODY,
+    });
+    expect(res.status).toBe(207);
+    expect(res.headers.get('X-Dav-Page-Count')).toBe(String(ENTRY_COUNT));
+  });
+});
+
+function readHeader(res: Response, name: string): number | null {
+  const raw = res.headers.get(name);
+  if (raw === null) return null;
+  const value = Number(raw);
+  return Number.isFinite(value) ? value : null;
+}
+
+/**
 Percent-encode each segment, the way `davClient.entryUrl` does.
 */
 function encodePath(path: string): string {

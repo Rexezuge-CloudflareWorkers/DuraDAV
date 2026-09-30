@@ -1,7 +1,105 @@
+diff --git a/dist/Fs-CX3m-F9L.d.ts b/dist/Fs-CX3m-F9L.d.ts
+index dd8a04c3ab0e75d3b992c99ccf9f4f18b7eef6db..2a45db827e2be2761c8090040b0a1e08fae24a05 100644
+--- a/dist/Fs-CX3m-F9L.d.ts
++++ b/dist/Fs-CX3m-F9L.d.ts
+@@ -34,6 +34,14 @@ type RmdirOptions = {
+ type ListDirOptions = {
+   recursive?: boolean;
+ };
++type ListDirPageOptions = {
++  offset?: number;
++  limit?: number;
++};
++type DirEntry = {
++  name: string;
++  isDirectory: boolean;
++};
+ type SetAttrOptions = {
+   mode?: number;
+   uid?: number;
+@@ -72,6 +80,8 @@ declare class Fs extends RpcTarget {
+   mkdir(path: string, options?: MkdirOptions): void;
+   rmdir(path: string, options?: RmdirOptions): void;
+   listDir(path: string, options?: ListDirOptions): string[];
++  listDirPage(path: string, options?: ListDirPageOptions): DirEntry[];
++  countChildren(path: string): number;
+   stat(path: string): Stat;
+   setattr(path: string, options: SetAttrOptions): void;
+   symlink(target: string, path: string): void;
+@@ -94,5 +104,5 @@ declare class Fs extends RpcTarget {
+ }
+ //# sourceMappingURL=Fs.d.ts.map
+ //#endregion
+-export { CreateOptions, DeviceStats, Fs, FsOptions, ListDirOptions, MkdirOptions, ReadFileOptions, ReadOptions, RmdirOptions, SetAttrOptions, Stat, WriteFileOptions, WriteOptions };
++export { CreateOptions, DeviceStats, DirEntry, Fs, FsOptions, ListDirOptions, ListDirPageOptions, MkdirOptions, ReadFileOptions, ReadOptions, RmdirOptions, SetAttrOptions, Stat, WriteFileOptions, WriteOptions };
+ //# sourceMappingURL=Fs-CX3m-F9L.d.ts.map
+\ No newline at end of file
+diff --git a/dist/index.d.ts b/dist/index.d.ts
+index f246a8642c6e9fc8115e3deabca814b2a5dcdedf..e13e8ed8f63db18f37bd73566d85dde4bd4beae2 100644
+--- a/dist/index.d.ts
++++ b/dist/index.d.ts
+@@ -1,4 +1,4 @@
+-import { CreateOptions, DeviceStats, Fs, FsOptions, ListDirOptions, MkdirOptions, ReadFileOptions, ReadOptions, RmdirOptions, SetAttrOptions, Stat, WriteFileOptions, WriteOptions } from "./Fs-CX3m-F9L.js";
++import { CreateOptions, DeviceStats, DirEntry, Fs, FsOptions, ListDirOptions, ListDirPageOptions, MkdirOptions, ReadFileOptions, ReadOptions, RmdirOptions, SetAttrOptions, Stat, WriteFileOptions, WriteOptions } from "./Fs-CX3m-F9L.js";
+ import { DurableObject } from "cloudflare:workers";
+ 
+ //#region src/withDofs.d.ts
+@@ -10,5 +10,5 @@ declare function Dofs<TEnv extends Cloudflare.Env>(options?: FsOptions): <T exte
+ //# sourceMappingURL=withDofs.d.ts.map
+ 
+ //#endregion
+-export { CreateOptions, DeviceStats, Dofs, Fs, FsOptions, ListDirOptions, MkdirOptions, ReadFileOptions, ReadOptions, RmdirOptions, SetAttrOptions, Stat, WithDofs, WriteFileOptions, WriteOptions, withDofs };
++export { CreateOptions, DeviceStats, DirEntry, Dofs, Fs, FsOptions, ListDirOptions, ListDirPageOptions, MkdirOptions, ReadFileOptions, ReadOptions, RmdirOptions, SetAttrOptions, Stat, WithDofs, WriteFileOptions, WriteOptions, withDofs };
+ //# sourceMappingURL=index.d.ts.map
+\ No newline at end of file
 diff --git a/dist/index.js b/dist/index.js
+index 0d02c5b7cd25098da1708e27a7e2bb6e20c75cdc..38590250289db72424ee7ec982b93c084e33d6af 100644
 --- a/dist/index.js
 +++ b/dist/index.js
-@@ -569,11 +569,5 @@ function Dofs(options = {}) {
+@@ -258,6 +258,42 @@ var Fs = class extends RpcTarget {
+ 		}
+ 		return names;
+ 	}
++	// Paged sibling listing. `listDir` cannot page: it returns `string[]` for
++	// every child from one unbounded scan, and it drops the `is_dir` column the
++	// scan already reads. A caller that only needs one page of a large
++	// directory still pays for the whole scan, then pays again per child to
++	// stat it (see `DavRepository.nodeInfo`). This returns one page, carrying
++	// `is_dir` so the caller can order collections-first without a stat per
++	// name.
++	//
++	// `ORDER BY is_dir DESC, name COLLATE NOCASE, name` is the same shape as the
++	// browser's own ordering (folders first, then case-insensitive name). The
++	// trailing binary `name` is load-bearing: NOCASE alone is NOT a total order
++	// (`A` and `a` compare equal), and a non-deterministic tiebreak lets SQLite
++	// order the same directory differently on two consecutive requests — which
++	// would show an entry on two pages, or on none. `idx_dofs_files_parent_name`
++	// covers the `parent = ?` lookup, but the ordering itself needs the sort.
++	listDirPage(path, options) {
++		const ino = this.resolvePathToInode(path);
++		const limit = Math.max(0, Math.trunc(options?.limit ?? 0));
++		const offset = Math.max(0, Math.trunc(options?.offset ?? 0));
++		const cursor = this.ctx.storage.sql.exec("SELECT name, is_dir FROM dofs_files WHERE parent = ? ORDER BY is_dir DESC, name COLLATE NOCASE, name LIMIT ? OFFSET ?", ino, limit, offset);
++		const out = [];
++		for (let row of cursor) if (typeof row.name === "string") out.push({
++			name: row.name,
++			isDirectory: !!row.is_dir
++		});
++		return out;
++	}
++	// Direct children count. Paired with `listDirPage` so a pager can render
++	// "1-100 of 12431" and know whether a Next page exists, without reading
++	// every row to find out. `COUNT(*)` over the `parent` index.
++	countChildren(path) {
++		const ino = this.resolvePathToInode(path);
++		const cursor = this.ctx.storage.sql.exec("SELECT COUNT(*) as count FROM dofs_files WHERE parent = ?", ino);
++		const row = cursor.next().value;
++		return row ? Number(row.count) : 0;
++	}
+ 	stat(path) {
+ 		const ino = this.resolvePathToInode(path);
+ 		const cursor = this.ctx.storage.sql.exec("SELECT attr, is_dir FROM dofs_files WHERE ino = ?", ino);
+@@ -569,12 +605,6 @@ function Dofs(options = {}) {
  		};
  	};
  }
@@ -13,3 +111,4 @@ diff --git a/dist/index.js b/dist/index.js
 -
  //#endregion
  export { Dofs, Fs, withDofs };
+ //# sourceMappingURL=index.js.map

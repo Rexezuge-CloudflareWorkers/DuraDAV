@@ -1,6 +1,6 @@
 /* eslint-disable @typescript-eslint/no-base-to-string -- DO SQLite rows are primitives (TEXT/INTEGER); Record<string, unknown> trips the object-stringification guard. */
 import { deleteNodeCascade, getDeadProperties, renameNodeCascade, upsertNode } from '@durable-dav/dav-store';
-import type { DofsFs, DurableSqlStorage } from '@durable-dav/dav-store';
+import type { DirEntry as DofsChildEntry, DofsFs, DurableSqlStorage } from '@durable-dav/dav-store';
 import { normalizeLockDetails, type DavNodeInfo, type LockDetails } from '@durable-dav/webdav';
 import { fsPathOf, hrefOf } from './DavContext';
 
@@ -169,6 +169,43 @@ class DavRepository {
       return this.dofs.listDir(fsPathOf(innerPath), { recursive: true }).filter((n) => n !== '.' && n !== '..');
     } catch {
       return [];
+    }
+  }
+
+  /**
+   * One page of direct children, as `{name, isDirectory}`.
+   *
+   * `listChildren` cannot back a pager: it materialises every name from one
+   * unbounded scan and discards the `is_dir` column that scan already reads, so
+   * ordering collections-first would cost a `statInner` per name. This carries
+   * `isDirectory` out of the same query and stops at the page boundary, so a
+   * caller hydrates `limit` children instead of all of them.
+   *
+   * Ordering is the server's, not the browser's — see `listDirPage`'s comment on
+   * why the trailing binary `name` tiebreak is load-bearing. Failures return an
+   * empty page (matching `listChildren`), which the caller cannot distinguish
+   * from an empty directory; that is deliberate, since a pager that reported an
+   * error would have to invent a total it does not have.
+   */
+  public listChildPage(innerPath: string, offset: number, limit: number): DofsChildEntry[] {
+    try {
+      return this.dofs.listDirPage(fsPathOf(innerPath), { offset, limit });
+    } catch {
+      return [];
+    }
+  }
+
+  /**
+   * Direct child count, for a pager's total and its last-page clamp.
+   *
+   * `COUNT(*)` over `idx_dofs_files_parent` rather than `listChildren().length`,
+   * which would read every row to count it.
+   */
+  public countChildren(innerPath: string): number {
+    try {
+      return this.dofs.countChildren(fsPathOf(innerPath));
+    } catch {
+      return 0;
     }
   }
 

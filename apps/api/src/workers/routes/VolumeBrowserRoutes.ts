@@ -5,6 +5,7 @@ import type { ApiApp, ApiContext } from '@/types/ApiContext';
 import { getVolumeStub } from '../doStubs';
 import { invalidateVolumeCaches, invalidatesReadCache } from './DavReadCache';
 import { resolveDestination } from './davDestination';
+import { readPageParams, stripPageParams } from './davPageParams';
 import { VolumeScopedRoute } from './VolumeScopedRoute';
 import type { VolumeRequestContext } from './VolumeScopedRoute';
 
@@ -51,6 +52,13 @@ class BrowserVolumeRoute extends VolumeScopedRoute {
     const hrefPrefixMode = readDavHrefPrefixMode(row.href_prefix_mode);
     const url = new URL(c.req.url);
     const inner = innerFromPath(url.pathname);
+    // Paging arrives as `?page=`/`?limit=` so a proxy in front of this plane
+    // forwards it without an allowlist change, and is re-emitted as request
+    // headers because the DO's URL is rebuilt from the DAV base below — the DO
+    // would never see the query string. The parameters are stripped from the
+    // forwarded URL so they cannot reach the DAV surface as a `DAV:` href.
+    const pageParams = readPageParams(url);
+    const forwardUrl = pageParams === null ? url : stripPageParams(url);
     const hasBody = !['GET', 'HEAD', 'OPTIONS'].includes(method);
     const destination = resolveDestination(c.req.raw.headers.get('Destination'), c.req.url, davBase, hrefPrefixMode);
     if (c.req.raw.headers.has('Destination') && !destination.ok) {
@@ -61,7 +69,7 @@ class BrowserVolumeRoute extends VolumeScopedRoute {
     // Forward to the DAV-base URL (not the browser URL): the DO falls back to
     // pathname parsing when X-Dav-Path is empty (root), and the browser prefix
     // would resolve to a nonexistent inner path there.
-    const forward = new Request(`${url.origin}${davBase}/${inner}`, {
+    const forward = new Request(`${forwardUrl.origin}${davBase}/${inner}`, {
       method,
       headers: (() => {
         const h = new Headers(c.req.raw.headers);
@@ -70,6 +78,15 @@ class BrowserVolumeRoute extends VolumeScopedRoute {
         h.set('X-Dav-Href-Prefix-Mode', hrefPrefixMode);
         h.set('X-Dav-User', email);
         if (destination.ok) h.set('Destination', destination.destination);
+        // A caller-supplied `X-Dav-Page*` must not survive: paging is opt-in per
+        // request and this plane decides it from the query string, so a hand-set
+        // header could otherwise page a request that never asked to be paged.
+        h.delete('X-Dav-Page');
+        h.delete('X-Dav-Page-Limit');
+        if (pageParams !== null) {
+          if (pageParams.page !== null) h.set('X-Dav-Page', pageParams.page);
+          if (pageParams.limit !== null) h.set('X-Dav-Page-Limit', pageParams.limit);
+        }
         // Never forward ambient Basic credentials into the DO on this plane;
         // session identity is authoritative here.
         h.delete('Authorization');

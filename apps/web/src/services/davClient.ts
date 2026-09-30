@@ -60,16 +60,67 @@ async function davFetch(url: string, init: RequestInit): Promise<Response> {
   return response;
 }
 
-export async function listDirectory(owner: string, volume: string, innerPath: string): Promise<DavEntry[]> {
-  const url = entryUrl(owner, volume, innerPath);
+/**
+ * One page of a directory listing.
+ *
+ * `paged` is `false` when the server did not answer with `X-Dav-Page-Count`,
+ * which means it does not implement paging (an older backend behind a
+ * Durable-DAV-Router, say). The caller then treats the returned entries as the
+ * complete listing and pages them itself — it must not assume a body with no
+ * paging headers is a complete listing *and* a partial one at once.
+ */
+export interface DavListing {
+  entries: DavEntry[];
+  page: number;
+  limit: number;
+  /**
+  Total entries, or `null` when the server did not report one.
+  */
+  total: number | null;
+  paged: boolean;
+}
+
+function readPagingHeader(response: Response, name: string): number | null {
+  const raw = response.headers.get(name);
+  if (raw === null || raw.trim() === '') return null;
+  const value = Number(raw);
+  return Number.isFinite(value) ? value : null;
+}
+
+export async function listDirectory(
+  owner: string,
+  volume: string,
+  innerPath: string,
+  page?: { page: number; limit: number },
+): Promise<DavListing> {
+  const base = entryUrl(owner, volume, innerPath);
+  // `entryUrl` has no query of its own today, but the join is written so a
+  // future `?backend=` selector cannot produce two `?` and silently drop the
+  // paging parameters — the failure mode would be a page that always looks
+  // like page 1.
+  const query = page === undefined ? '' : `?page=${encodeURIComponent(String(page.page))}&limit=${encodeURIComponent(String(page.limit))}`;
+  const url = `${base}${query}`;
   const body = `<?xml version="1.0" encoding="utf-8"?><propfind xmlns="DAV:"><allprop/></propfind>`;
   const response = await davFetch(url, {
     method: 'PROPFIND',
     headers: { Depth: '1', 'Content-Type': 'application/xml; charset=utf-8' },
     body,
   });
+  // Read the headers before the body: `readDav` consumes the stream.
+  const total = readPagingHeader(response, 'X-Dav-Page-Count');
+  const effectivePage = readPagingHeader(response, 'X-Dav-Page');
+  const effectiveLimit = readPagingHeader(response, 'X-Dav-Page-Limit');
   const xml = await readDav(response);
-  return parseMultistatus(xml, innerPath, davBase(owner, volume));
+  const entries = parseMultistatus(xml, innerPath, davBase(owner, volume));
+  return {
+    entries,
+    // Echo back the *effective* values: a request for page 99 of a 1-page
+    // collection is served page 1, and the URL should say so.
+    page: effectivePage ?? page?.page ?? 1,
+    limit: effectiveLimit ?? page?.limit ?? Math.max(1, entries.length),
+    total,
+    paged: total !== null,
+  };
 }
 
 export async function createDirectory(owner: string, volume: string, innerPath: string): Promise<void> {
