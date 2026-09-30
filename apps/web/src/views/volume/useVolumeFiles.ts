@@ -3,16 +3,25 @@ import { useTranslation } from 'react-i18next';
 import type { DavEntry } from '../../types';
 import { toLocalizedErrorMessage } from '../../lib/backendErrors';
 import { listDirectory } from '../../services/davClient';
+import { pageCountFor } from '../../lib/davPage';
 
 // Data-fetching slice for the file browser (why: `VolumeView` mixed routing,
 // fetching, and mutations; isolating the query keeps the view a thin
 // composition root like `SpaApp`).
-function useVolumeFiles(owner: string, volume: string, path: string) {
+function useVolumeFiles(owner: string, volume: string, path: string, requestedPage: number, pageSize: number) {
   const { t } = useTranslation();
   const [entries, setEntries] = useState<DavEntry[]>([]);
   const [status, setStatus] = useState<'loading' | 'ready' | 'missing'>('loading');
   const [reloadKey, setReloadKey] = useState(0);
   const [notice, setNotice] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
+  // Server-authoritative paging. `total` is null when the server does not page,
+  // which is what switches the view to slicing the full listing client-side.
+  const [paging, setPaging] = useState<{ page: number; pageCount: number; total: number | null; paged: boolean }>({
+    page: 1,
+    pageCount: 1,
+    total: null,
+    paged: false,
+  });
 
   useEffect(() => {
     let cancelled = false;
@@ -29,9 +38,15 @@ function useVolumeFiles(owner: string, volume: string, path: string) {
       // if they lived in the folder that just failed to load.
       setEntries([]);
       try {
-        const rows = await listDirectory(owner, volume, path);
+        const rows = await listDirectory(owner, volume, path, { page: requestedPage, limit: pageSize });
         if (cancelled) return;
-        setEntries(rows);
+        setEntries(rows.entries);
+        setPaging({
+          page: rows.page,
+          pageCount: rows.total === null ? 1 : pageCountFor(rows.total, rows.limit),
+          total: rows.total,
+          paged: rows.paged,
+        });
         setStatus('ready');
       } catch (error) {
         if (cancelled) return;
@@ -47,7 +62,7 @@ function useVolumeFiles(owner: string, volume: string, path: string) {
     // including it made the effect fire twice per cold load (once
     // speculatively while auth was still resolving, once after) for an
     // identical request.
-  }, [owner, volume, path, reloadKey, t]);
+  }, [owner, volume, path, requestedPage, pageSize, reloadKey, t]);
 
   const refresh = useCallback(() => {
     setStatus('loading');
@@ -61,7 +76,7 @@ function useVolumeFiles(owner: string, volume: string, path: string) {
 
   const crumbs = path === '' ? [] : path.split('/');
 
-  return { entries, status, refresh, crumbs, notice, consumeNotice };
+  return { entries, status, refresh, crumbs, notice, consumeNotice, paging };
 }
 
 export { useVolumeFiles };

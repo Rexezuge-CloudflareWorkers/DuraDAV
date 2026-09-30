@@ -1,5 +1,6 @@
 import { Fs } from 'dofs';
 
+
 type DofsFs = Fs;
 
 type DofsContext = {
@@ -41,4 +42,6 @@ function setDofsDeviceSize(dofs: DofsFs, bytes: number): void {
 }
 
 export { createDofsFs, setDofsDeviceSize, validateChunkSize, DEFAULT_CHUNK_SIZE, MAX_CHUNK_SIZE };
-export type { DofsFs, DofsContext, DofsEnvironment, DofsOptions };
+export type { DofsFs, DofsContext, DofsEnvironment, DofsOptions,  };
+
+export {type DirEntry} from 'dofs';

@@ -21,6 +21,8 @@ async function readXmlBody(request: Request): Promise<string | null> {
 }
 import { hrefOf } from '../DavContext';
 import type { DavBases } from '../DavContext';
+import { pagingHeaders, readPagingHeaders, resolvePaging } from '../PropfindPaging';
+import type { DavPaging } from '../PropfindPaging';
 import type { DavLockGuard } from '../DavLockGuard';
 import type { DavRepository } from '../DavRepository';
 
@@ -47,12 +49,23 @@ async function handlePropfind(request: Request, innerPath: string, bases: DavBas
   let page = `<?xml version="1.0" encoding="utf-8"?>\n<multistatus xmlns="DAV:">`;
   const props = parsed.mode === 'prop' ? parsed.properties : [];
   page += generatePropfindResponse(node, parsed.mode, props, bases.hrefBase);
+  let paging: DavPaging | null = null;
   if (node?.isCollection ?? true) {
     const depth = request.headers.get('Depth') ?? 'infinity';
     if (depth !== '0' && depth !== '1' && depth !== 'infinity') return new Response('Bad Request', { status: 400 });
+    // Only `Depth: 1` can be paged: `Depth: 0` has no children to page over, and
+    // `Depth: infinity` walks the whole subtree, where a page boundary is
+    // meaningless. A paging request for either is served in full.
+    const requested = readPagingHeaders(request);
+    if (requested !== null && depth === '1') paging = resolvePaging(requested, repo.countChildren(innerPath));
     if (depth !== '0') {
       const seen = new Set<string>();
-      for (const name of repo.listChildren(innerPath)) {
+      // Paged: one indexed scan for the page's names, then `nodeInfo` for those
+      // names only. The unpaged branch is the one below, and its cost is the
+      // reason this branch exists — `nodeInfo` is a `statInner` plus a
+      // `dav_nodes` read, a `dav_locks` query and a `dav_props` read, per child.
+      const directChildren = paging === null ? repo.listChildren(innerPath) : repo.listChildPage(innerPath, paging.offset, paging.limit).map((child) => child.name);
+      for (const name of directChildren) {
         const childInner = repo.childInner(innerPath, name);
         seen.add(childInner);
         const child = repo.nodeInfo(childInner, bases.hrefBase);
@@ -69,7 +82,9 @@ async function handlePropfind(request: Request, innerPath: string, bases: DavBas
     }
   }
   page += '\n</multistatus>\n';
-  return new Response(page, { status: 207, headers: { 'Content-Type': 'application/xml; charset=utf-8' } });
+  const headers: Record<string, string> = { 'Content-Type': 'application/xml; charset=utf-8' };
+  if (paging !== null) Object.assign(headers, pagingHeaders(paging));
+  return new Response(page, { status: 207, headers });
 }
 
 async function handleProppatch(
