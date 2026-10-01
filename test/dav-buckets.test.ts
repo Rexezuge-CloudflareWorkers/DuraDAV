@@ -202,29 +202,29 @@ describe('DavPermissionService owner-only', () => {
   // is enough and keeps the fixture readable.
   const volume = { id: 'v1', owner_email: 'owner@x.co', owner_user_id: 'usr_owner', is_private: 1 } as DavVolumeRow;
 
-  it('owner is admin, others hidden on private, public read', async () => {
+  it('owner is admin, others hidden on private, public read', () => {
     const perm = new DavPermissionService();
-    await expect(perm.getRole({ userId: 'usr_owner', email: 'owner@x.co' }, volume)).resolves.toBe('admin');
-    await expect(perm.getRole({ userId: 'usr_friend', email: 'friend@x.co' }, volume)).resolves.toBeNull();
-    await expect(perm.getRole(null, volume)).resolves.toBeNull();
+    expect(perm.getRole({ userId: 'usr_owner', email: 'owner@x.co' }, volume)).toBe('admin');
+    expect(perm.getRole({ userId: 'usr_friend', email: 'friend@x.co' }, volume)).toBeNull();
+    expect(perm.getRole(null, volume)).toBeNull();
     const publicVolume: DavVolumeRow = { ...volume, is_private: 0 };
-    await expect(perm.getRole(null, publicVolume)).resolves.toBe('read');
-    await expect(perm.getRole({ userId: 'usr_friend', email: 'friend@x.co' }, publicVolume)).resolves.toBe('read');
+    expect(perm.getRole(null, publicVolume)).toBe('read');
+    expect(perm.getRole({ userId: 'usr_friend', email: 'friend@x.co' }, publicVolume)).toBe('read');
   });
 
-  it('an anonymous viewer never matches an owner key', async () => {
+  it('an anonymous viewer never matches an owner key', () => {
     // `getRole(null, ...)` is the public-anon-read path. Before 0004 it took a
     // nullable email, so a caller could pass the owner address; the id makes
     // that unrepresentable.
     const perm = new DavPermissionService();
-    await expect(perm.getRole(null, volume)).resolves.toBeNull();
+    expect(perm.getRole(null, volume)).toBeNull();
   });
 
-  it('a viewer with no resolved id is refused on a keyed row', async () => {
+  it('a viewer with no resolved id is refused on a keyed row', () => {
     // Pre-0004 caller (no `users.id`) against a post-backfill row: refuse, do
     // not fall back to the anchor.
     const perm = new DavPermissionService();
-    await expect(perm.getRole({ userId: null, email: 'owner@x.co' }, volume)).resolves.toBeNull();
+    expect(perm.getRole({ userId: null, email: 'owner@x.co' }, volume)).toBeNull();
   });
 });
 

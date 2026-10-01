@@ -25,6 +25,12 @@ export interface Volume {
    * third-party clients see.
    */
   hrefPrefixMode: DavHrefPrefixMode;
+  /**
+   * The server's own `href` for this bucket. Carried from the API response and
+   * never read by the browser — bucket URLs are built from `owner`/`name`, which
+   * are the two fields the browser can trust regardless of the bucket's href
+   * prefix mode.
+   */
   href: string;
 }
 
@@ -61,6 +67,16 @@ export interface UserProfile {
   username: string;
 }
 
+/**
+ * One row of a bucket listing.
+ *
+ * `href`, `contentType`, and `etag` are parsed but not read by the browser: the
+ * request URL is rebuilt from `path` (which is `href` with the volume prefix
+ * removed), so the raw href is never needed again. They are kept because the
+ * multistatus parser is the one place the server's `DAV:href` is interpreted at
+ * all, and dropping the fields would make the §8.3 prefix-stripping untestable
+ * against a real body.
+ */
 export interface DavEntry {
   href: string;
   name: string;

@@ -1,4 +1,4 @@
-import { useCallback, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { NOTICE_TIMEOUT_MS } from '../lib/constants';
 
 export interface Notice {
@@ -18,6 +18,16 @@ export function useNotice() {
       timerRef.current = null;
     }, NOTICE_TIMEOUT_MS);
   }, []);
+
+  // Cleared on unmount. The timer was only ever cleared in favour of the *next*
+  // notice, so unmounting with a notice showing left it live to call `setState`
+  // on a gone component.
+  useEffect(
+    () => () => {
+      if (timerRef.current !== null) clearTimeout(timerRef.current);
+    },
+    [],
+  );
 
   return { notice, showNotice };
 }

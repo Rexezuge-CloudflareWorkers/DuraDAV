@@ -2,7 +2,7 @@
 import { deleteNodeCascade, getDeadProperties, renameNodeCascade, upsertNode } from '@durable-dav/dav-store';
 import type { DirEntry as DofsChildEntry, DofsFs, DurableSqlStorage } from '@durable-dav/dav-store';
 import { normalizeLockDetails, type DavNodeInfo, type LockDetails } from '@durable-dav/webdav';
-import { fsPathOf, hrefOf } from './DavContext';
+import { fsPathOf, hrefOf, MAX_PATH_DEPTH } from './DavContext';
 
 // Repository over dofs + DO SQLite (why: the DO previously inlined every
 // `dav_nodes/props/locks` statement, duplicating `dav-store/meta.ts` and
@@ -65,11 +65,16 @@ class DavRepository {
    * prevent. Uses the same ancestor set as the guard.
    */
   private applicableLocks(innerPath: string, hrefBase: string): LockDetails[] {
+    // Same ancestor set, and the same `MAX_PATH_DEPTH` bound, as
+    // `DavLockGuard.ancestorsOf` — see that method for why the cap has to leave
+    // room for the volume root. When the two disagreed, `lockdiscovery` and the
+    // guard each reported a different answer for the same resource, which is
+    // the one thing a lock-discovery property exists to prevent.
     const ancestors: string[] = [];
     let cur = innerPath;
     for (;;) {
       ancestors.push(cur);
-      if (cur === '' || ancestors.length >= 256) break;
+      if (cur === '' || ancestors.length > MAX_PATH_DEPTH) break;
       const slash = cur.lastIndexOf('/');
       cur = slash === -1 ? '' : cur.slice(0, slash);
     }
@@ -141,6 +146,21 @@ class DavRepository {
       locks,
       deadProperties: getDeadProperties(this.sql, innerPath),
     };
+  }
+
+  /**
+   * Paths of every descendant of `innerPath`, or `[]` when the collection is
+   * empty.
+   *
+   * Distinct from `listRecursive`, which **swallows** a listing failure and
+   * returns `[]`. That is the right answer for "render a listing" and the
+   * wrong one for "is any descendant locked": a transient storage error would
+   * make an empty list indistinguishable from "nothing is locked", and the
+   * caller's answer would be to delete a locked subtree. This variant throws
+   * instead, so a caller deciding on lock state fails closed.
+   */
+  public requireRecursive(innerPath: string): string[] {
+    return this.dofs.listDir(fsPathOf(innerPath), { recursive: true }).filter((n) => n !== '.' && n !== '..');
   }
 
   public rootNode(): DavNodeInfo {
@@ -222,15 +242,35 @@ class DavRepository {
 
   public upsertFileNode(innerPath: string, contentType: string, etag: string, now: number, crtime?: number): void {
     try {
-      upsertNode(this.sql, innerPath, { isCollection: false, contentType, etag, mtime: now, crtime });
+      // `lockNull: false` is the point: real content was written, so this is no
+      // longer a resource that exists only to hold a lock, even if the bytes
+      // happen to be zero.
+      upsertNode(this.sql, innerPath, { isCollection: false, contentType, etag, mtime: now, crtime, lockNull: false });
     } catch {
       // Metadata is best-effort; file bytes already persisted.
     }
   }
 
+  /**
+   * Was this resource created by a LOCK and never written to since?
+   *
+   * The only question `handleUnlock` needs answered, and the only place the
+   * `dav_nodes.lock_null` bit is read. Fails *closed* — an unreadable row is
+   * reported as "not a lock-null resource", so a metadata failure leaves the
+   * empty file in place instead of deleting a file it cannot classify.
+   */
+  public isLockNull(innerPath: string): boolean {
+    try {
+      const rows = this.sql.exec(`SELECT lock_null FROM dav_nodes WHERE path = ?`, innerPath).toArray();
+      return rows[0]?.['lock_null'] === 1;
+    } catch {
+      return false;
+    }
+  }
+
   public upsertCollectionNode(innerPath: string, now: number): void {
     try {
-      upsertNode(this.sql, innerPath, { isCollection: true, mtime: now, crtime: now });
+      upsertNode(this.sql, innerPath, { isCollection: true, mtime: now, crtime: now, lockNull: false });
     } catch {
       // Metadata is best-effort; directory already created.
     }
@@ -242,7 +282,7 @@ class DavRepository {
       const row = rows[0];
       const now = Date.now();
       this.sql.exec(
-        `INSERT INTO dav_nodes (path, is_collection, content_type, etag, mtime, crtime) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(path) DO UPDATE SET is_collection=excluded.is_collection, content_type=excluded.content_type, etag=excluded.etag, mtime=excluded.mtime`,
+        `INSERT INTO dav_nodes (path, is_collection, content_type, etag, mtime, crtime, lock_null) VALUES (?, ?, ?, ?, ?, ?, 0) ON CONFLICT(path) DO UPDATE SET is_collection=excluded.is_collection, content_type=excluded.content_type, etag=excluded.etag, mtime=excluded.mtime, lock_null=0`,
         to,
         isCollection ? 1 : 0,
         row?.['content_type'] ?? null,

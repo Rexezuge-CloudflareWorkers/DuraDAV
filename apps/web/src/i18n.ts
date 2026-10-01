@@ -12,9 +12,16 @@ const baseResources = {
   en: { translation: en },
 } as const;
 
+/**
+ * Normalize a BCP 47-ish tag (`en_us` → `en-US`).
+ *
+ * Kept local rather than imported from `@durable-dav/shared`: web ships with
+ * zero `@durable-dav/*` runtime deps. The backend has its own copy at
+ * `packages/shared/src/utils/LanguageTag.ts` — the two operate on disjoint
+ * inputs (the browser's `navigator.language` and stored preference vs. an
+ * HTTP `Accept-Language` header), so there is no shared behaviour to drift.
+ */
 function canonicalizeTag(tag: string): string {
-  // Same BCP 47-ish normalization as `../Git` (web ships with 0
-  // `@durable-dav/*` runtime deps, so the body is intentionally local).
   const normalized = tag.trim().replaceAll('_', '-');
   const parts = normalized.split('-').filter(Boolean);
   if (parts.length === 0) return 'en';
@@ -22,12 +29,6 @@ function canonicalizeTag(tag: string): string {
   if (parts.length === 1) return language;
   const rest = parts.slice(1).map((part: string) => (part.length === 2 ? part.toUpperCase() : part.toLowerCase()));
   return [language, ...rest].join('-');
-}
-
-// Single canonicalizer for BCP 47-ish tags (`en_us` → `en-US`).
-// `lib/locale.ts` delegates here so normalization lives in one place.
-export function canonicalizeLanguageTag(tag: string): string {
-  return canonicalizeTag(tag);
 }
 
 export function normalizeLanguage(tag: string | null | undefined): SupportedLanguage {

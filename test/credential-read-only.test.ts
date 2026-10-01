@@ -117,7 +117,7 @@ function buildApp(volume: DavVolumeRow, row: Record<string, unknown> | null): { 
     scope.bindValue(Tokens.DavCredentialDAO, () => Promise.resolve(new DavCredentialDAO(db)));
     // The anonymous-read branch is never taken when a credential is present,
     // but the token has to resolve or the container throws.
-    scope.bindValue(Tokens.DavPermissionService, { getRole: () => Promise.resolve('read' as const) } as unknown as DavPermissionService);
+    scope.bindValue(Tokens.DavPermissionService, { getRole: () => 'read' as const } as unknown as DavPermissionService);
     scope.bindValue(Tokens.UserIdentityService, { resolveUserById: () => Promise.resolve(null) } as unknown as UserIdentityService);
     setRequestScope(c, scope);
     await next();

@@ -1,6 +1,7 @@
 import type { DavEntry } from '../types';
 import { BackendError, readDav } from '../lib/api';
 import { parseMultistatus, stripSlashes } from '../lib/davXml';
+import { DEFAULT_PAGE_SIZE } from '../lib/davPage';
 
 /**
 Public volume base, as it appears in `DAV:href` values (RFC 4918 §8.3).
@@ -117,7 +118,10 @@ export async function listDirectory(
     // Echo back the *effective* values: a request for page 99 of a 1-page
     // collection is served page 1, and the URL should say so.
     page: effectivePage ?? page?.page ?? 1,
-    limit: effectiveLimit ?? page?.limit ?? Math.max(1, entries.length),
+    // Never derived from `entries.length`: an empty collection would report a
+    // limit of 1 and a paged-but-empty page, which reads as "1 entry" rather
+    // than "none". The caller only ever asked for a limit, so fall back to that.
+    limit: effectiveLimit ?? page?.limit ?? DEFAULT_PAGE_SIZE,
     total,
     paged: total !== null,
   };
@@ -139,7 +143,23 @@ export async function deleteEntry(owner: string, volume: string, innerPath: stri
   await davFetch(entryUrl(owner, volume, innerPath), { method: 'DELETE' });
 }
 
-export async function moveEntry(owner: string, volume: string, fromPath: string, toPath: string, overwrite = true): Promise<void> {
+/**
+ * Refuse to replace an existing destination.
+ *
+ * Defaults to `false`, which sends `Overwrite: F` and turns a collision into a
+ * `412` instead of a silent delete.
+ *
+ * With `true` (the old default) a rename onto an existing name went through as
+ * `Overwrite: T`, and the server's COPY/MOVE implementation removes the
+ * destination *before* creating the source — so in a folder holding both
+ * `a.txt` and `b.txt`, renaming `a.txt` to `b.txt` deleted `b.txt` and its
+ * contents with no prompt and no undo. The SPA gates its other irreversible
+ * actions (bucket delete behind a type-to-confirm, entry delete behind a
+ * confirmation), so rename and duplicate were the two paths with no guard at
+ * all. `412` is the answer the RFC defines for exactly this (§9.9.4), and it
+ * lets the caller decide rather than assume consent.
+ */
+export async function moveEntry(owner: string, volume: string, fromPath: string, toPath: string, overwrite = false): Promise<void> {
   const destination = new URL(entryUrl(owner, volume, toPath), globalThis.location.origin).href;
   await davFetch(entryUrl(owner, volume, fromPath), {
     method: 'MOVE',
@@ -147,7 +167,7 @@ export async function moveEntry(owner: string, volume: string, fromPath: string,
   });
 }
 
-export async function copyEntry(owner: string, volume: string, fromPath: string, toPath: string, overwrite = true): Promise<void> {
+export async function copyEntry(owner: string, volume: string, fromPath: string, toPath: string, overwrite = false): Promise<void> {
   const destination = new URL(entryUrl(owner, volume, toPath), globalThis.location.origin).href;
   await davFetch(entryUrl(owner, volume, fromPath), {
     method: 'COPY',

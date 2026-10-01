@@ -1,3 +1,4 @@
+import { useCallback } from 'react';
 import { useMatch } from 'react-router-dom';
 import { Header } from './components/layout/Header';
 import { NoticeBar } from './components/layout/NoticeBar';
@@ -15,9 +16,16 @@ function TopHeader({ userEmail, username }: { userEmail: string | null; username
 
 export default function SpaApp() {
   const { notice, showNotice } = useNotice();
-  const { user, setUser, authorized } = useCurrentUser((message) => {
-    showNotice('error', `Could Not Load Your Account: ${message}`);
-  });
+  // `useCallback` here is belt-and-braces, not the fix: `useCurrentUser` reads
+  // `onError` through a ref so an unstable callback cannot re-arm its fetch.
+  // Stabilising it anyway keeps this component from modelling the trap.
+  const handleAccountError = useCallback(
+    (message: string) => {
+      showNotice('error', `Could Not Load Your Account: ${message}`);
+    },
+    [showNotice],
+  );
+  const { user, setUser, authorized } = useCurrentUser(handleAccountError);
   const { language, languageStatus, languagePending, handleLanguageChange } = useSpaLanguage({
     user,
     showNotice,

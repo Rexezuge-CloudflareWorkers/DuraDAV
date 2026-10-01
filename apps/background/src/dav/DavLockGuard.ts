@@ -1,6 +1,7 @@
 /* eslint-disable @typescript-eslint/no-base-to-string -- DO SQLite rows are primitives (TEXT/INTEGER); Record<string, unknown> trips the object-stringification guard. */
 import type { DurableSqlStorage } from '@durable-dav/dav-store';
 import { getParentPath, getRequestLockTokens, hasAlwaysFalseIfCondition, normalizeLockToken } from '@durable-dav/webdav';
+import { MAX_PATH_DEPTH } from './DavContext';
 
 // Lock precondition guard (why: every mutating method duplicated the
 // ancestor-walk + token-match logic; one Policy object keeps RFC 4918 §9.10
@@ -8,14 +9,27 @@ import { getParentPath, getRequestLockTokens, hasAlwaysFalseIfCondition, normali
 class DavLockGuard {
   constructor(private readonly sql: DurableSqlStorage) {}
 
-  // Ancestor chain of `innerPath`, nearest first, root last. Bounded so a
-  // pathological deep path cannot drive an unbounded SQL walk.
+  /**
+   * Ancestor chain of `innerPath`, nearest first, root last.
+   *
+   * Bounded so a pathological deep path cannot drive an unbounded SQL walk,
+   * and the bound is `MAX_PATH_DEPTH` — the same limit `isValidInnerPath`
+   * accepts, imported rather than re-typed as a literal. The previous `256`
+   * literal was one segment short: a path of exactly 256 segments filled the
+   * cap with depths 256→1 and stopped *before* pushing the volume root `''`,
+   * so a `Depth: infinity` lock on the root silently stopped applying one level
+   * below maximum depth. `DavRepository.applicableLocks` had the identical cap,
+   * which is why `lockdiscovery` agreed with the guard and the bug was
+   * invisible from either side.
+   */
   private static ancestorsOf(innerPath: string): string[] {
     const out: string[] = [];
     let cur = innerPath;
     for (;;) {
       out.push(cur);
-      if (cur === '' || out.length >= 256) break;
+      // `cur === ''` is the normal exit; the cap only bounds a pathological
+      // path, and it must leave room for the root.
+      if (cur === '' || out.length > MAX_PATH_DEPTH) break;
       cur = getParentPath(cur);
     }
     return out;
@@ -63,16 +77,24 @@ class DavLockGuard {
   }
 
   /**
-   * Lock tokens on `innerPath` held by *other* clients. Used by recursive
-   * DELETE to refuse removing locked descendants (RFC 4918 §9.6.1 / §9.10.4).
-   * Throws on lookup failure — an empty result must mean "genuinely unlocked".
+   * Lock tokens on `innerPath` held by *other* clients, as
+   * `{ token, scope }`. Used by recursive DELETE and MOVE to refuse removing or
+   * relocating locked descendants (RFC 4918 §9.6.1 / §9.9.4 / §10.4), and by
+   * a depth-infinity LOCK to detect a conflicting lock already held below the
+   * collection (§7.4) — which needs the scope, since a shared lock only
+   * conflicts with an exclusive request.
+   *
+   * Deliberately returns the scope: a bare token list cannot answer "is any
+   * descendant locked in a manner that conflicts", which is a different question
+   * from "is anything locked at all". Throws on lookup failure — an empty
+   * result must mean "genuinely unlocked".
    */
-  public activeTokensForPath(innerPath: string, tokens: string[]): string[] {
+  public activeTokensForPath(innerPath: string, tokens: string[]): { token: string; scope: string }[] {
     const normalized = new Set(tokens.map((t) => normalizeLockToken(t)));
     return this.locksAffecting(innerPath)
       .filter((lock) => lock.path === innerPath)
-      .map((lock) => lock.token)
-      .filter((token) => token !== '' && !normalized.has(normalizeLockToken(token)));
+      .map((lock) => ({ token: lock.token, scope: lock.scope }))
+      .filter((lock) => lock.token !== '' && !normalized.has(normalizeLockToken(lock.token)));
   }
 }
 

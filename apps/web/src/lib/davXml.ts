@@ -74,6 +74,19 @@ function splitResponses(xml: string): string[] {
 }
 
 /**
+ * Is this response the collection being listed?
+ *
+ * A `Depth: 1` PROPFIND returns the collection itself plus its members (§9.1),
+ * and the self response is not a member. Compared case-insensitively because
+ * the volume-prefix strip above is: the two used different comparisons, so a
+ * folder reached with a differently-cased `?path=` failed the exact test and
+ * rendered its own self response as a row pointing at itself.
+ */
+function isSelfResponse(hrefPath: string, normalizedBase: string): boolean {
+  return hrefPath.toLowerCase() === normalizedBase.toLowerCase();
+}
+
+/**
  * Parses an RFC 4918 `207 multistatus` body into directory entries.
  * Namespace-prefix agnostic (`D:`, `d:`, or none) so it stays robust across
  * server renderers.
@@ -83,14 +96,45 @@ function splitResponses(xml: string): string[] {
  * against the request URL — so it is stripped to recover the volume-relative
  * path the UI works in. The parser still tolerates hrefs *without* the prefix
  * so it keeps working against a non-conforming server.
+ *
+ * ## Why an unparseable body throws
+ *
+ * `VolumeFileList` renders `entries.length === 0` as a positive assertion:
+ * "Empty Folder. Upload A File Or Create A Subfolder." An empty array is
+ * therefore a *claim about the server's contents*, not an absence of
+ * information — so answering `[]` to "I could not parse this body" states a
+ * falsehood, and the only case where that matters is the one a user hits.
+ *
+ * The old parser scanned for `<response` and returned `[]` when it found none,
+ * never checking that the document was a multistatus at all. That was not
+ * hypothetical: a `Depth: 1` PROPFIND on a *file* is perfectly conforming and
+ * contains only the self response, which was then skipped — so opening
+ * `?path=<a-file>` rendered "Empty Folder" over a file that exists and has
+ * content. A share link to a file is not an edge case.
+ *
+ * So the three outcomes are now distinct: a folder listing drops its self
+ * response, a file listing *keeps* it as a single-entry listing (the UI then
+ * describes the file, which is true), and a body that is not a multistatus is
+ * an error rather than an empty folder.
  */
 export function parseMultistatus(xml: string, basePath: string, volumePrefix = ''): DavEntry[] {
   const normalizedBase = stripSlashes(basePath);
   const prefix = stripSlashes(volumePrefix);
+  const normalized = stripNamespacePrefixes(xml);
+  if (!/<multistatus[\s>]/.test(normalized)) {
+    throw new Error('Response was not a DAV multistatus body');
+  }
+  const blocks = splitResponses(normalized);
+  if (blocks.length === 0) {
+    throw new Error('DAV multistatus body contained no response elements');
+  }
   const entries: DavEntry[] = [];
-  for (const block of splitResponses(xml)) {
+  let selfEntry: DavEntry | null = null;
+  let sawHref = false;
+  for (const block of blocks) {
     const rawHref = pickTag(block, 'href');
     if (!rawHref) continue;
+    sawHref = true;
     let hrefPath = decodeHref(rawHref);
     const queryAt = hrefPath.indexOf('?');
     if (queryAt !== -1) hrefPath = hrefPath.slice(0, queryAt);
@@ -109,15 +153,13 @@ export function parseMultistatus(xml: string, basePath: string, volumePrefix = '
     } else if (hrefPath.toLowerCase() === prefix.toLowerCase()) {
       hrefPath = '';
     }
-    // Skip the self response (the listed collection itself).
-    if (hrefPath === normalizedBase) continue;
 
     const isCollection = block.includes('<collection');
     const sizeText = pickTag(block, 'getcontentlength');
     const size = sizeText === null || sizeText === '' ? null : Number(sizeText);
     const slashAt = hrefPath.lastIndexOf('/');
     const name = slashAt === -1 ? hrefPath : hrefPath.slice(slashAt + 1);
-    entries.push({
+    const entry: DavEntry = {
       href: rawHref,
       name,
       path: hrefPath,
@@ -126,7 +168,30 @@ export function parseMultistatus(xml: string, basePath: string, volumePrefix = '
       contentType: pickTag(block, 'getcontenttype'),
       lastModified: pickTag(block, 'getlastmodified'),
       etag: pickTag(block, 'getetag'),
-    });
+    };
+    if (isSelfResponse(hrefPath, normalizedBase)) {
+      // Held back, then re-added below only if it is the *only* response — which
+      // is what "this path is a file" looks like from the client's side.
+      selfEntry = entry;
+      continue;
+    }
+    entries.push(entry);
+  }
+  if (!sawHref) {
+    throw new Error('DAV multistatus response had no href');
+  }
+  // A `Depth: 1` PROPFIND on a **file** is conforming (§9.1) and returns exactly
+  // one response: the file itself. That is a one-entry listing, and reporting it
+  // as `[]` is how the UI came to assert that an existing file was an empty
+  // folder. Its `resourcetype` carries no `<collection/>`, which is the only thing
+  // that distinguishes it.
+  //
+  // An **empty collection** also returns exactly one response, and that one *is* a
+  // collection — so it stays dropped and the folder correctly reads as empty. The
+  // `isCollection` test is load-bearing: without it, every empty folder in the
+  // bucket would render a phantom row pointing at itself.
+  if (selfEntry !== null && entries.length === 0 && !selfEntry.isCollection) {
+    entries.push(selfEntry);
   }
   // Deterministic order: collections first, then case-insensitive name.
   entries.sort((a, b) => {
@@ -136,6 +201,15 @@ export function parseMultistatus(xml: string, basePath: string, volumePrefix = '
   return entries;
 }
 
+/**
+ * Join a folder path and a child name.
+ *
+ * Exported for the unit tests only — nothing in `src` calls it, since every
+ * path the browser requests is reconstructed from `DavEntry.path` (already
+ * volume-relative) or from a breadcrumb segment. It is retained as the
+ * documented counterpart to `parentDavPath` so the two directions of the same
+ * transformation are tested against each other.
+ */
 export function joinDavPath(base: string, name: string): string {
   const clean = stripSlashes(base);
   const leaf = stripSlashes(name);

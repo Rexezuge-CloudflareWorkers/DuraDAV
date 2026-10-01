@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Check, Copy } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { Label } from '../ui/Input';
@@ -10,10 +10,36 @@ export function ReadOnlyField({ label, value, showCopy = false }: { label: strin
   const [copied, setCopied] = useState(false);
 
   const handleCopy = () => {
-    void navigator.clipboard.writeText(value);
-    setCopied(true);
-    setTimeout(() => setCopied(false), COPY_FEEDBACK_TIMEOUT_MS);
+    // `navigator.clipboard` is absent in an insecure context and its promise
+    // rejects on a denied permission, so an unguarded call produced an
+    // unhandled rejection *and* showed the checkmark anyway — reporting success
+    // for a copy that never happened. This is the copy-once reveal for a bucket
+    // credential's password, where a false success means the user walks away
+    // believing they have the secret and have not.
+    //
+    // The guarded/catch form was already correct in `TypeToConfirmModal`; the two
+    // copies of this handler had drifted apart.
+    const clipboard = globalThis.navigator?.clipboard as Clipboard | undefined;
+    if (!clipboard) return;
+    void clipboard
+      .writeText(value)
+      .then(() => {
+        setCopied(true);
+        resetTimer.current = setTimeout(() => setCopied(false), COPY_FEEDBACK_TIMEOUT_MS);
+      })
+      // Leave `copied` false: nothing was copied, so there is nothing to undo.
+      .catch(() => undefined);
   };
+
+  // Cleared on unmount. Repeated clicks each replaced the timer before, so an
+  // early one could clear the checkmark while a later copy was still pending.
+  const resetTimer = useRef<number | null>(null);
+  useEffect(
+    () => () => {
+      if (resetTimer.current !== null) clearTimeout(resetTimer.current);
+    },
+    [],
+  );
 
   return (
     <div>

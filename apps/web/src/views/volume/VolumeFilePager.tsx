@@ -1,6 +1,6 @@
 import { useTranslation } from 'react-i18next';
 import { ChevronLeft, ChevronRight } from 'lucide-react';
-import { PAGE_SIZE_OPTIONS, hasNextPage, pageCountFor } from '../../lib/davPage';
+import { PAGE_SIZE_OPTIONS, hasEntries, hasNextPage, pageCountFor } from '../../lib/davPage';
 import { Button } from '../../components/ui/Button';
 
 /**
@@ -9,14 +9,20 @@ import { Button } from '../../components/ui/Button';
  * Renders nothing when the whole collection fits on one page, so a small folder
  * shows no pager at all rather than a disabled one.
  *
- * The `?page=` correction is the subtle part. The server clamps an out-of-range
- * page and echoes the page it actually served, so a stale link (`?page=9` after
- * the folder shrank) is corrected by pushing the served page into the URL
- * rather than leaving the address bar disagreeing with the rows on screen. It
- * uses `replace` so correcting a link does not add a history entry the back
- * button would walk back into.
+ * `limit` is the limit the **server** applied, not the one the browser asked
+ * for — the DO clamps independently (`MAX_PAGE_SIZE`), so a request above it
+ * comes back smaller. It used to be passed the browser's own preference, which
+ * made the range display disagree with the rows above it whenever the two
+ * differed.
+ *
+ * `entries` is a second, independent gate. A folder that failed to load has no
+ * rows and its `total` is meaningless, but the pager used to render on any files
+ * tab — so navigating from a 300-entry folder into one that 404'd kept
+ * "Page 1 of 3 — 1–100 of 300" on screen under "This Folder Does Not Exist",
+ * and Next paged a folder that was not there.
  */
 function VolumeFilePager({
+  entries,
   page,
   limit,
   total,
@@ -24,6 +30,10 @@ function VolumeFilePager({
   onPageChange,
   onPageSizeChange,
 }: {
+  /**
+   * The rows currently displayed. Their absence means there is nothing to page.
+   */
+  entries: readonly unknown[];
   page: number;
   limit: number;
   /**
@@ -38,7 +48,7 @@ function VolumeFilePager({
   onPageSizeChange: (limit: number) => void;
 }) {
   const { t } = useTranslation();
-  if (!paged || total === null) return null;
+  if (!paged || total === null || !hasEntries(entries)) return null;
   const pageCount = pageCountFor(total, limit);
   if (pageCount <= 1) return null;
   const first = (page - 1) * limit + 1;

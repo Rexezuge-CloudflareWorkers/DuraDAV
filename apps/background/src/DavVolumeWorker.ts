@@ -123,8 +123,13 @@ class DavVolumeWorker extends DurableObject<Env> {
     // scan. A dedicated COPY-only delete had reimplemented DELETE minus that
     // scan and could `rmdir --recursive` a collection with locked children.
     const deleteDestination = async (destInner: string, overwriteRequest: Request): Promise<Response | null> => {
+      // `handleDelete` answers 204 on success, so `res.ok` alone is the whole
+      // test. The previous `res.ok || res.status === 204` had a second arm that
+      // could never decide anything (`Response.ok` is `status >= 200 && < 300`,
+      // which already covers 204) — dead code that read as if the two branches
+      // meant different things.
       const res = await handleDelete(overwriteRequest, destInner, repo, locks, this.dofs);
-      return res.ok || res.status === 204 ? null : res;
+      return res.ok ? null : res;
     };
 
     switch (request.method) {
@@ -176,6 +181,7 @@ class DavVolumeWorker extends DurableObject<Env> {
           sql,
           writeEmptyFile: (p) => this.transfer().writeEmptyFile(p),
           statIsDirectory: (p) => repo.statInner(p).isDirectory,
+          unlink: (p) => this.dofs.unlink(fsPathOf(p)),
         });
       }
       case 'UNLOCK': {

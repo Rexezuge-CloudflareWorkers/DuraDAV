@@ -118,6 +118,32 @@ async function handleDav(c: DavContext, owner: string, volume: string, inner: st
   return cors(c, response);
 }
 
+/**
+ * Volume-relative path, from the raw request URL.
+ *
+ * Must not be derived by slicing `url.pathname` with a base built from
+ * `c.req.param()`. Hono **decodes** path params, while `url.pathname` is still
+ * percent-encoded, so the two only agree when the client sent the owner and
+ * volume verbatim. RFC 3986 §2.3 permits percent-encoding any unreserved
+ * character, so `/%61lice/vol/file.txt` is the same resource as
+ * `/alice/vol/file.txt` — and against the decoded base, `startsWith` failed,
+ * `suffix` became `''`, and the request was forwarded with `X-Dav-Path: ''`.
+ * The DO then served the **volume root** instead of `file.txt`: a `GET` returned
+ * the root's collection listing, and a `PROPFIND` returned the wrong
+ * multistatus. A wrong answer, not an error, which is the worst shape a path
+ * bug can take.
+ *
+ * Slicing positionally sidesteps the encoding question entirely: the route
+ * matched exactly two leading segments (`owner`, `volume`), so dropping them
+ * leaves the inner path — still encoded, which is what `resolveInnerPath`'s
+ * `decodeSegments` expects.
+ */
+function innerPathOf(requestUrl: string): string {
+  const segments = new URL(requestUrl).pathname.split('/');
+  // `['', owner, volume, ...rest]` for an absolute path.
+  return stripSlashes(segments.slice(3).join('/'));
+}
+
 function registerDavRoutes(app: App): void {
   // WebDAV volume surface: /:owner/:volume/* (multi-volume from day one).
   // Depth handling lives in the DO; the front adds fail-soft KV caching
@@ -126,13 +152,7 @@ function registerDavRoutes(app: App): void {
   app.on(methods, '/:owner/:volume/*', async (c) => {
     const owner = c.req.param('owner') ?? '';
     const volume = c.req.param('volume') ?? '';
-    const url = new URL(c.req.url);
-    const base = `/${owner}/${volume}`;
-    // Preserve display case for the base until auth resolves canonical names;
-    // `handleDav` re-derives the canonical base from the auth result.
-    const suffix = url.pathname.startsWith(base) ? url.pathname.slice(base.length) : '';
-    const inner = stripSlashes(suffix);
-    return handleDav(c, owner, volume, inner);
+    return handleDav(c, owner, volume, innerPathOf(c.req.raw.url));
   });
 
   app.on(methods, '/:owner/:volume', async (c) => {
@@ -148,5 +168,5 @@ function registerDavRoutes(app: App): void {
   app.all('/:owner/:volume/*', methodNotAllowed as never);
 }
 
-export { registerDavRoutes };
+export { registerDavRoutes, innerPathOf };
 export type { App };

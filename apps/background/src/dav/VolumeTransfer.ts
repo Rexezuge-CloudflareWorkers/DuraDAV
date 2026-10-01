@@ -149,6 +149,13 @@ class VolumeTransfer {
 
   /**
   Create the zero-byte file that backs a lock-null resource.
+
+  The row is stamped `lockNull` so `handleUnlock` can tell this apart from an
+  empty file the client uploaded. RFC 4918 §7.3 makes the two the same
+  resource, but it also says a locked empty resource "SHOULD NOT disappear when
+  its lock goes away" — which cannot be honoured by inspecting size alone, since
+  a zero-byte `PUT` is indistinguishable from one of these. The flag is the only
+  thing that carries the difference.
   */
   public async writeEmptyFile(innerPath: string): Promise<boolean> {
     try {
@@ -158,9 +165,10 @@ class VolumeTransfer {
     }
     try {
       const now = Date.now();
-      upsertNode(this.sql, innerPath, { isCollection: false, mtime: now, crtime: now });
+      upsertNode(this.sql, innerPath, { isCollection: false, mtime: now, crtime: now, lockNull: true });
     } catch {
-      // Metadata is best-effort; the zero-byte file already exists.
+      // Metadata is best-effort; the zero-byte file already exists. A missing
+      // flag costs one abandoned lock-null file, which is the old behaviour.
     }
     return true;
   }

@@ -1,5 +1,6 @@
+// @vitest-environment jsdom
 import { describe, expect, it } from 'vitest';
-import { clampPage, clampPageSize, hasNextPage, pageCountFor } from '../apps/web/src/lib/davPage';
+import { PAGE_SIZE_OPTIONS, clampPage, clampPageSize, hasEntries, hasNextPage, pageCountFor, readStoredPageSize } from '../apps/web/src/lib/davPage';
 import { clampPageNumber, clampPageSize as clampServerPageSize, clampPageToCollection, offsetForPage, pageCountFor as serverPageCountFor } from '../packages/dav-store/src/listing';
 
 /**
@@ -54,6 +55,50 @@ describe('page size clamping', () => {
     expect(clampServerPageSize(10.9)).toBe(10);
     expect(clampServerPageSize(5)).toBe(5);
     expect(clampServerPageSize(100)).toBe(100);
+  });
+});
+
+describe('stored page-size preference', () => {
+  // A `<select value="1">` with no matching `<option>` renders blank
+  // (`selectedIndex === -1`), so a persisted value the selector does not offer is
+  // a broken control rather than a valid preference — and it is durable, so it
+  // survives until the user happens to touch the dropdown.
+  const store = (value: string) => localStorage.setItem('durable-dav-page-size', value);
+
+  it('returns the default when nothing is stored', () => {
+    localStorage.removeItem('durable-dav-page-size');
+    expect(readStoredPageSize()).toBe(100);
+  });
+
+  it('keeps an offered size exactly', () => {
+    for (const size of PAGE_SIZE_OPTIONS) {
+      store(String(size));
+      expect(readStoredPageSize()).toBe(size);
+    }
+  });
+
+  it('snaps a corrupt value to an offered size', () => {
+    for (const corrupt of ['1', '0x10', '1e1', ' 25 ', '999', '7']) {
+      store(corrupt);
+      const resolved = readStoredPageSize();
+      expect(PAGE_SIZE_OPTIONS).toContain(resolved);
+    }
+  });
+
+  it('falls back to the default for an unusable value', () => {
+    for (const unusable of ['abc', '', '0', '-5', 'NaN']) {
+      store(unusable);
+      expect(readStoredPageSize()).toBe(100);
+    }
+  });
+});
+
+describe('pager visibility', () => {
+  it('reports a loaded page as pageable and an empty one as not', () => {
+    expect(hasEntries([{ name: 'a' }])).toBe(true);
+    // A folder that failed to load has no rows and a `total` belonging to
+    // whichever folder loaded last.
+    expect(hasEntries([])).toBe(false);
   });
 });
 

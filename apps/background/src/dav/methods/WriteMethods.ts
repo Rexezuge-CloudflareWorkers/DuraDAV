@@ -14,10 +14,18 @@ async function handlePut(
   dofs: DofsFs,
   maxFileBytes: number,
 ): Promise<Response> {
-  // The resource type comes from the request target, not `isDirectory`:
-  // `PUT /a/b/` for a *file* named `b` is a 404 (no such collection), and
-  // `PUT /` on the root is a 405.
-  if (innerPath === '' || request.url.endsWith('/')) return new Response('Method Not Allowed', { status: 405 });
+  // The resource type comes from the request target, not `isDirectory`: the
+  // request *path* trailing in `/` names a collection, which PUT refuses
+  // (§9.7.2 — 405 is defined for an existing collection), and the root itself is
+  // a collection too, so both answer 405.
+  //
+  // `new URL(request.url).pathname`, not `request.url.endsWith('/')`: the
+  // latter tests the whole URL including the query string, so
+  // `PUT /a/notes.txt?next=/` — an ordinary file with a query parameter ending
+  // in a slash — was answered 405. A trailing slash is a property of the path
+  // (§8.3), not of the URL, and `DavVolumeWorker` already builds this `URL` for
+  // addressing, so the two can no longer disagree.
+  if (innerPath === '' || new URL(request.url).pathname.endsWith('/')) return new Response('Method Not Allowed', { status: 405 });
   const locked = locks.assertLock(request, innerPath);
   if (locked) return locked;
   const parent = getParentPath(innerPath);
@@ -61,8 +69,20 @@ async function handleDelete(
   const locked = locks.assertLock(request, innerPath);
   if (locked) return locked;
   if (st.isDirectory) {
+    // `requireRecursive`, not `listRecursive`: this loop is a *lock check*, and
+    // `listRecursive` answers `[]` on any listing failure — so a transient
+    // storage error made "I could not enumerate" indistinguishable from "nothing
+    // is locked", and the recursive delete below then removed a locked file.
+    // This is the only lock check in the DO that could fail open; it now cannot.
+    let descendants: string[];
+    try {
+      descendants = repo.requireRecursive(innerPath);
+    } catch {
+      // Fail closed: refuse rather than delete a subtree whose locks are unknown.
+      return new Response('Internal Server Error', { status: 500 });
+    }
     const tokens = getRequestLockTokens(request);
-    for (const name of repo.listRecursive(innerPath)) {
+    for (const name of descendants) {
       const childInner = repo.childInner(innerPath, name);
       if (locks.activeTokensForPath(childInner, tokens).length > 0) {
         return new Response('Locked', { status: 423 });

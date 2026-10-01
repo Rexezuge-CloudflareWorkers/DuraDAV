@@ -15,11 +15,16 @@ function useVolumeFiles(owner: string, volume: string, path: string, requestedPa
   const [reloadKey, setReloadKey] = useState(0);
   const [notice, setNotice] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
   // Server-authoritative paging. `total` is null when the server does not page,
-  // which is what switches the view to slicing the full listing client-side.
-  const [paging, setPaging] = useState<{ page: number; pageCount: number; total: number | null; paged: boolean }>({
+// which is what switches the view to slicing the full listing client-side.
+  // `limit` is the limit the *server* applied, not the one we asked for: it is
+  // clamped independently in the DO (`MAX_PAGE_SIZE`), so a request for more
+  // than that comes back smaller. The view needs the effective value for the
+  // range display, and the two differed whenever the request exceeded it.
+  const [paging, setPaging] = useState<{ page: number; pageCount: number; total: number | null; limit: number; paged: boolean }>({
     page: 1,
     pageCount: 1,
     total: null,
+    limit: pageSize,
     paged: false,
   });
 
@@ -37,6 +42,12 @@ function useVolumeFiles(owner: string, volume: string, path: string, requestedPa
       // them under the new breadcrumb — the previous folder's files displayed as
       // if they lived in the folder that just failed to load.
       setEntries([]);
+      // Paging state is reset too. The catch branch below sets
+      // `status: 'missing'` without clearing it, so navigating from a 300-entry
+      // folder into one that 404'd left the pager reading "Page 1 of 3 — 1-100
+      // of 300" under the message "This Folder Does Not Exist" — and Next then
+      // set `?page=2` on a folder that was not there.
+      setPaging({ page: 1, pageCount: 1, total: null, limit: pageSize, paged: false });
       try {
         const rows = await listDirectory(owner, volume, path, { page: requestedPage, limit: pageSize });
         if (cancelled) return;
@@ -45,6 +56,7 @@ function useVolumeFiles(owner: string, volume: string, path: string, requestedPa
           page: rows.page,
           pageCount: rows.total === null ? 1 : pageCountFor(rows.total, rows.limit),
           total: rows.total,
+          limit: rows.limit,
           paged: rows.paged,
         });
         setStatus('ready');

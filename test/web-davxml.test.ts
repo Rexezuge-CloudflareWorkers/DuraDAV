@@ -56,6 +56,55 @@ describe('web PROPFIND parser (browser/server round-trip)', () => {
   });
 });
 
+describe('parseMultistatus distinguishes empty from unparseable', () => {
+  // `VolumeFileList` renders `entries.length === 0` as the assertion "Empty
+  // Folder. Upload A File Or Create A Subfolder." So `[]` is a claim about the
+  // server's contents, and answering it to "I could not read this body" states
+  // something false.
+  it('keeps the self response for a file, which is not an empty folder', () => {
+    // A `Depth: 1` PROPFIND on a file is conforming (§9.1) and returns exactly
+    // one response — the file. Skipping it produced `[]`, so opening
+    // `?path=<a-file>` (a share link to a file, not an edge case) rendered
+    // "Empty Folder" over a file that exists and has content.
+    const xml = multistatus([node('notes.txt', false, 42)]);
+    const entries = parseMultistatus(xml, 'notes.txt');
+    expect(entries).toHaveLength(1);
+    expect(entries[0]).toMatchObject({ name: 'notes.txt', path: 'notes.txt', isCollection: false, size: 42 });
+  });
+
+  it('still reports an empty collection as empty', () => {
+    // Same single response, but its resourcetype carries `<collection/>` — that
+    // is the only thing separating "empty folder" from "a file". Dropping the
+    // test on the response count would render a phantom self row in every empty
+    // folder in the bucket.
+    const xml = multistatus([node('docs', true)]);
+    expect(parseMultistatus(xml, 'docs')).toEqual([]);
+  });
+
+  it('rejects a body that is not a multistatus', () => {
+    for (const body of ['<html><body>502</body></html>', '', 'not xml at all', JSON.stringify({ error: 'nope' })]) {
+      expect(() => parseMultistatus(body, '')).toThrow(/multistatus/i);
+    }
+  });
+
+  it('rejects a multistatus with no responses', () => {
+    expect(() => parseMultistatus('<multistatus xmlns="DAV:"></multistatus>', '')).toThrow(/no response/i);
+  });
+
+  it('rejects responses with no href', () => {
+    const xml = `<multistatus xmlns="DAV:"><response><propstat><prop><resourcetype/></prop><status>HTTP/1.1 200 OK</status></propstat></response></multistatus>`;
+    expect(() => parseMultistatus(xml, '')).toThrow(/no href/i);
+  });
+
+  it('matches the self response case-insensitively', () => {
+    // The prefix strip above is case-insensitive; this test was an exact
+    // comparison, so a folder reached with a differently-cased `?path=` listed
+    // its own self response as a row pointing at itself.
+    const xml = multistatus([node('docs', true), node('docs/a.txt', false, 1)]);
+    expect(parseMultistatus(xml, 'DOCS').map((e) => e.path)).toEqual(['docs/a.txt']);
+  });
+});
+
 describe('web dav path helpers', () => {
   it('joins and walks parents', () => {
     expect(joinDavPath('', 'a')).toBe('a');

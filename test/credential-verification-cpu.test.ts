@@ -109,7 +109,7 @@ function buildApp(volume: DavVolumeRow, row: Record<string, unknown> | null): Te
     const scope = new Container();
     scope.bindValue(Tokens.VolumeService, { getVolume: () => Promise.resolve(volume) } as unknown as VolumeService);
     scope.bindValue(Tokens.DavCredentialDAO, () => Promise.resolve(new DavCredentialDAO(db)));
-    scope.bindValue(Tokens.DavPermissionService, { getRole: () => Promise.resolve('read' as const) } as unknown as DavPermissionService);
+    scope.bindValue(Tokens.DavPermissionService, { getRole: () => 'read' as const } as unknown as DavPermissionService);
     scope.bindValue(Tokens.UserIdentityService, { resolveUserById: () => Promise.resolve(null) } as unknown as UserIdentityService);
     setRequestScope(c, scope);
     await next();
@@ -485,7 +485,7 @@ describe('a D1 failure on the auth hot path is a typed DatabaseError', () => {
       const scope = new Container();
       scope.bindValue(Tokens.VolumeService, { getVolume: () => Promise.resolve(volumeRow()) } as unknown as VolumeService);
       scope.bindValue(Tokens.DavCredentialDAO, () => Promise.resolve(new DavCredentialDAO(failing)));
-      scope.bindValue(Tokens.DavPermissionService, { getRole: () => Promise.resolve('read' as const) } as unknown as DavPermissionService);
+      scope.bindValue(Tokens.DavPermissionService, { getRole: () => 'read' as const } as unknown as DavPermissionService);
       scope.bindValue(Tokens.UserIdentityService, { resolveUserById: () => Promise.resolve(null) } as unknown as UserIdentityService);
       setRequestScope(c, scope);
       await next();

@@ -130,10 +130,21 @@ class UserIdentityService {
     }
     const holder = await emailDAO.resolveVerified(email);
     if (holder && holder.user_id !== row.id) throw new BadRequestError('Email is already in use');
+    // Order is load-bearing, and it is the one `scripts/change-email.ts` already
+    // gets right: claim first, move `current_email` second, revoke third.
+    //
+    // This ran register -> revoke -> setCurrentEmail, which inverts it. If
+    // `setCurrentEmail` then failed — most plausibly on the UNIQUE constraint
+    // `idx_users_current_email`, which another account can hold — every
+    // address was already revoked, so nothing authenticated while
+    // `users.current_email` still named the old one. Not a permanent lockout
+    // (login resolves through the registry, and the new address is verified),
+    // but `summarize()` reported the old address and `getByCurrentEmail` no
+    // longer matched, for every subsequent request.
     await emailDAO.register({ email, userId: row.id, isVerified: true, now });
+    await userDAO.setCurrentEmail(row.id, email, now);
     // Revoke every other verified address, so only the new one authenticates.
     await emailDAO.revokeAllVerified(row.id, email);
-    await userDAO.setCurrentEmail(row.id, email, now);
     this.byEmail.delete(current);
     this.byEmail.set(email, { id: row.id, email, anchorEmail: row.email, username: row.username ?? null });
     return { id: row.id, email, anchorEmail: row.email, username: row.username ?? null };

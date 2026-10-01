@@ -124,9 +124,14 @@ describe('metadata cascade prefix matching is wildcard-free', () => {
   it('renames a subtree with the same wildcard-free predicate', () => {
     const { statements, sql } = recordingSql();
     renameNodeCascade(sql, 'a_b', 'a_b2');
-    expect(statements).toHaveLength(3);
+    // Two tables, not three: RFC 4918 §7.6 — "A successful MOVE request on a
+    // write locked resource MUST NOT move the write lock with the resource."
+    // Re-pathing `dav_locks` carried the lock out of the collection it was
+    // taken on and onto a resource in a collection the locker never named.
+    expect(statements).toHaveLength(2);
     for (const { sql: text } of statements) {
       expect(text).not.toContain('LIKE');
+      expect(text).not.toContain('dav_locks');
     }
     // `to` and the suffix offset come first, then the subtree bindings.
     expect(statements[0]?.bindings).toEqual(['a_b2', 'a_b'.length + 1, 'a_b', 'a_b'.length + 1, 'a_b/']);

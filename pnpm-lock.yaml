@@ -5,7 +5,7 @@ settings:
   excludeLinksFromLockfile: false
 
 patchedDependencies:
-  dofs@0.1.0: 3af915a3be9016a321461e2a89ad28ad1f50f39fc89ea9dcee8285e6923d5d78
+  dofs@0.1.0: 21317a197333fa14d1e33c5c82818bc9f9fc846edb558c4a608bf8f83fbcaf64
 
 importers:
 
@@ -304,7 +304,7 @@ importers:
         version: link:../webdav
       dofs:
         specifier: ^0.1.0
-        version: 0.1.0(patch_hash=3af915a3be9016a321461e2a89ad28ad1f50f39fc89ea9dcee8285e6923d5d78)(hono@4.13.8)
+        version: 0.1.0(patch_hash=21317a197333fa14d1e33c5c82818bc9f9fc846edb558c4a608bf8f83fbcaf64)(hono@4.13.8)
     devDependencies:
       '@types/node':
         specifier: 26.6.2
@@ -4246,7 +4246,7 @@ snapshots:
 
   detect-libc@2.1.2: {}
 
-  dofs@0.1.0(patch_hash=3af915a3be9016a321461e2a89ad28ad1f50f39fc89ea9dcee8285e6923d5d78)(hono@4.13.8):
+  dofs@0.1.0(patch_hash=21317a197333fa14d1e33c5c82818bc9f9fc846edb558c4a608bf8f83fbcaf64)(hono@4.13.8):
     dependencies:
       commander: 14.0.3
       hono: 4.13.8
