@@ -15,7 +15,7 @@
     "@durable-dav/shared": "workspace:*",
     "@durable-dav/webdav": "workspace:*",
     "chanfana": "3.4.0",
-    "hono": "4.13.8",
+    "hono": "4.13.10",
     "zod": "4.6.5"
   },
   "devDependencies": {
