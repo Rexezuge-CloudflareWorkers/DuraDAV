@@ -15,7 +15,7 @@
     "@durable-dav/dav-store": "workspace:*",
     "@durable-dav/shared": "workspace:*",
     "@durable-dav/webdav": "workspace:*",
-    "hono": "4.13.8",
+    "hono": "4.13.10",
     "react": "19.3.0",
     "react-dom": "19.3.0",
     "vitest": "4.1.11"
