@@ -21,7 +21,7 @@
     "vitest": "4.1.11"
   },
   "devDependencies": {
-    "@cloudflare/workers-types": "5.20260921.1",
+    "@cloudflare/workers-types": "5.20260928.1",
     "@testing-library/jest-dom": "7.0.1",
     "@testing-library/react": "16.3.3",
     "@types/node": "26.6.3",
