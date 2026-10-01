@@ -74,13 +74,31 @@ describe('localized error messages', () => {
     expect(message).not.toBe('gone');
   });
 
+  it('appends the server detail instead of discarding it', () => {
+    // `Conflict` localizes to one word and `PayloadTooLarge` to two, so a
+    // duplicate bucket name, the 10-credential cap, and the 50 MB upload cap all
+    // surfaced with no information at all — even though the backend had sent a
+    // specific `Exception.Message`. Localized first, server detail second.
+    expect(toLocalizedErrorMessage(t, new BackendError('Volume already exists', 'Conflict', 400), 'errors.generic', 'Generic')).toBe(
+      'Conflict. (Volume already exists)',
+    );
+  });
+
+  it('does not double a message that merely restates the localized text', () => {
+    expect(toLocalizedErrorMessage(t, new BackendError('Conflict', 'Conflict', 409), 'errors.generic', 'Generic')).toBe('Conflict.');
+  });
+
   it('falls back for an unknown backend type', () => {
     const message = toLocalizedErrorMessage(t, new BackendError('weird', 'Teapot', 418), 'errors.generic', 'Generic');
     expect(message).toBeTruthy();
   });
 
-  it('falls back for a non-BackendError', () => {
-    expect(toLocalizedErrorMessage(t, new Error('boom'), 'errors.generic', 'Generic')).toBe('Generic');
+  it('appends the detail for a non-BackendError too', () => {
+    expect(toLocalizedErrorMessage(t, new Error('boom'), 'errors.generic', 'Generic')).toBe('Generic (boom)');
+  });
+
+  it('does not append an empty detail', () => {
+    expect(toLocalizedErrorMessage(t, new Error(' '.repeat(3)), 'errors.generic', 'Generic')).toBe('Generic');
   });
 });
 

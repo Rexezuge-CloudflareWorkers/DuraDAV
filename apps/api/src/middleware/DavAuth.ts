@@ -242,7 +242,7 @@ async function davAuthForVolumeInner(
   // No credential: public buckets allow anonymous reads only; all writes
   // and all private access require a bucket credential.
   if (!needWrite && !isPrivate) {
-    const role = await scope.get(Tokens.DavPermissionService).getRole(null, volume);
+    const role = scope.get(Tokens.DavPermissionService).getRole(null, volume);
     // An anonymous read is anonymous even on a public bucket: there is no
     // caller to attribute, so this reports no owner identity rather than
     // claiming the volume's owner made the request.

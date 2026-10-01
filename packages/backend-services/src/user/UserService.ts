@@ -3,7 +3,7 @@ import type { UserRow } from '@durable-dav/backend-data/dao';
 import type { D1Queryable } from '@durable-dav/backend-data/utils';
 import { BadRequestError, NotFoundError } from '@durable-dav/backend-errors';
 import { isReservedNamespaceName, isValidUsername } from '@durable-dav/shared/constants';
-import { TimestampUtil } from '@durable-dav/shared/utils';
+import { isMissingSchemaError, TimestampUtil } from '@durable-dav/shared/utils';
 import { cascadeOwnerVolumes } from './volumeRenameCascade';
 import { registerAccount, resolveAccount } from './accountLookup';
 import type { AccountLookupDeps, AccountSummary, ResolvedAccount } from './accountLookup';
@@ -171,17 +171,27 @@ class UserService {
       await nsDao.claim({ usernameCi: handleCi, kind: 'user', userEmail: account.anchorEmail, userId: account.id, now });
       return { claimedFresh: true };
     } catch (error) {
-      // Claim race. If the existing claim belongs to *this* account — a rename
-      // back to a name it previously held — treat it as success.
+      // Claim race, or the registry is unavailable.
+      //
+      // The old `catch (inner)` inferred "there is no `namespaces` table at all"
+      // from `get`/`isTaken` having thrown. That inference is unsound: both
+      // throw on a transient D1 failure too, and none of those mean the table
+      // is absent. The rename then committed `users.username` with no matching
+      // namespace row — the half-applied state this method's claim-first
+      // ordering exists to prevent.
+      //
+      // So a genuine schema absence still degrades (that is what the pre-0004
+      // `users.username` fallback is for), and anything else rethrows.
       try {
-        const row = await nsDao.get(handleCi).catch(() => null);
+        const row = await nsDao.get(handleCi);
         if (row && namespaceBelongsTo(row, account)) return { claimedFresh: false };
         if (await nsDao.isTaken(handleCi)) throw new BadRequestError('Username is already taken');
       } catch (inner) {
         // A `BadRequestError` is our own verdict ("taken") and must propagate.
         if (inner instanceof BadRequestError) throw inner;
-        // `get`/`isTaken` themselves threw, which means there is no `namespaces`
-        // table at all: fall back to `users.username` as authoritative.
+        // Absent registry only. A failed read is not that, and must not be
+        // allowed to read as it.
+        if (!isMissingSchemaError(inner)) throw inner;
         return { claimedFresh: false, legacyNamespaces: true };
       }
       throw error instanceof Error ? error : new BadRequestError('Username is already taken');
@@ -203,8 +213,12 @@ class UserService {
     const claim = await this.claimHandle(nsDao, handleCi, account, now);
     const oldCi = account.username?.toLowerCase();
     const userDAO = await this.deps.userDAO();
+    // `handleCi`, not `handle`: the DAO stores lowercase, and returning `handle`
+    // here would hand the caller back a value the database does not hold. Every
+    // downstream comparison is lowercase, so this is the same string the row
+    // really has.
     try {
-      await userDAO.setUsername(account.id, handle, now);
+      await userDAO.setUsername(account.id, handleCi, now);
     } catch (error) {
       // Only release a claim *we* took. Releasing one we merely found already
       // belonging to us would free a name the account still owns.
@@ -220,11 +234,11 @@ class UserService {
     // propagation. Renamed-away handles remain taken for other accounts, but the
     // owning account may reclaim them.
     if (oldCi) {
-      await cascadeOwnerVolumes({ volumeDAO: this.deps.volumeDAO }, { oldOwnerCi: oldCi, newOwner: handle, now }).catch(() => {
+      await cascadeOwnerVolumes({ volumeDAO: this.deps.volumeDAO }, { oldOwnerCi: oldCi, newOwner: handleCi, now }).catch(() => {
         // ignore
       });
     }
-    return { id: account.id, email: account.email, username: handle };
+    return { id: account.id, email: account.email, username: handleCi };
   }
 
   /**
@@ -238,16 +252,26 @@ class UserService {
   private async isHandleTaken(nsDao: NamespaceDAO, handleCi: string, account: ResolvedAccount): Promise<boolean> {
     let otherOwned = false;
     let selfOwned = false;
+    let namespaceUnreadable = false;
     try {
       const row = await nsDao.get(handleCi);
       if (row) {
         if (row.kind === 'user' && namespaceBelongsTo(row, account)) selfOwned = true;
         else otherOwned = true;
       }
-    } catch {
-      // get failed — fall through to isTaken below.
+    } catch (error) {
+      // Only a missing registry is tolerable here, and only because the pre-0004
+      // `users.username` fallback exists. A *failed read* is an outage, and the
+      // old bare `catch` reported it as "no claim exists" — which let a rename
+      // commit on top of a claim this code could not see, the exact
+      // half-applied state the claim-first ordering above exists to prevent.
+      // Fail closed instead: treat an unverifiable registry as taken.
+      namespaceUnreadable = !isMissingSchemaError(error);
     }
     if (otherOwned) return true;
+    // Unreadable registry: answer "taken", so `renameUsername` refuses. Same
+    // posture as an unreadable claim, for the same reason.
+    if (namespaceUnreadable) return true;
     if (!selfOwned && (await nsDao.isTaken(handleCi).catch(() => false))) return true;
     const userMatch = await this.deps
       .userDAO()

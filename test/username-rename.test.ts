@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { DavVolumeDAO } from '@durable-dav/backend-data/dao';
+import { DavVolumeDAO, UserDAO } from '@durable-dav/backend-data/dao';
 import { UserService } from '@durable-dav/backend-services/user';
 
 type UserRowFixture = {
@@ -159,13 +159,24 @@ describe('UserService rename with volume cascade', () => {
     const svc = new UserService({ DB: makeD1(db) as never });
 
     const renamed = await svc.renameUsername('alice@example.com', 'Alice2');
-    expect(renamed).toEqual({ id: 'usr_alice', email: 'alice@example.com', username: 'Alice2' });
+    // Normalised to lowercase, not stored as typed. `users.username` is BINARY
+    // collated and every read lowercases its parameter, so a stored `Alice2` is
+    // a different value from `alice2` and the handle becomes permanently
+    // unfindable: `GET /users/alice2` 404s, and re-submitting the same name hits
+    // the case-insensitive equality short-circuit and reports success while
+    // changing nothing — no way back through the API.
+    expect(renamed).toEqual({ id: 'usr_alice', email: 'alice@example.com', username: 'alice2' });
     // The account id and the frozen anchor are untouched by a rename: only the
     // handle moves.
     expect(db.users[0]?.id).toBe('usr_alice');
     expect(db.users[0]?.email).toBe('alice@example.com');
+    // The stored column is normalised, and the handle still round-trips through
+    // the CI lookup — the property that was broken.
+    expect(db.users[0]?.username).toBe('alice2');
+    expect(await new UserDAO(makeD1(db) as never).getByUsernameCi('ALICE2')).not.toBeNull();
+    expect(await new UserDAO(makeD1(db) as never).getByUsernameCi('alice2')).not.toBeNull();
     expect(db.namespaces.some((n) => n.username_ci === 'alice')).toBe(true);
-    expect(db.volumes[0]?.owner).toBe('Alice2');
+    expect(db.volumes[0]?.owner).toBe('alice2');
     expect(db.volumes[0]?.owner_ci).toBe('alice2');
 
     seedUser(db, 'usr_bob', 'bob@x.co', 'bob');

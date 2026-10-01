@@ -27,5 +27,10 @@
     "ENVIRONMENT": "development",
     "DEV_AUTH_EMAIL": "test@example.com",
     "SITE_URL": "https://example.com",
+    // Deliberately small so a single PUT can exceed the *device* budget and
+    // exercise dofs' ENOSPC path. It sits under `MAX_FILE_BYTES` (50 MB) so the
+    // request reaches the filesystem instead of being refused by the per-file cap
+    // first. The production default is 5 GB, which no test could reach.
+    "DO_DEVICE_BYTES": "4194304",
   },
 }

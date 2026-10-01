@@ -1,4 +1,5 @@
 import { UserDAO, UserEmailDAO } from '@durable-dav/backend-data/dao';
+import { isMissingSchemaError } from '@durable-dav/shared/utils';
 
 /**
  * A resolved account.
@@ -63,19 +64,42 @@ export async function resolveAccount(deps: AccountLookupDeps, email: string): Pr
   // to, and a *revoked* row (the account moved off this address) must not
   // resolve at all. Falling through to the legacy lookups in that case would let
   // a reassigned address keep authenticating the previous holder's account.
+  //
+  // Only a *missing registry* falls through, and "missing" means one specific
+  // thing: migration 0004 has not run. The previous `.catch(() => null)`
+  // answered that question for **every** failure, so a transient D1 error on this
+  // one statement made the code proceed to the anchor lookup below —
+  // `getByEmail`, which is documented as an attribution lookup whose key is a
+  // re-registrable string, not an identity. An address whose account had moved
+  // off it (so its `user_emails` row is revoked, and correctly refuses to
+  // resolve) would then be resolved against the *previous holder's* anchor, and
+  // that account's id was installed as the caller's identity: full `/user/*`
+  // access to someone else's buckets, username, and credentials. One failed
+  // `SELECT` was enough.
+  //
+  // So the degradation is narrowed to `isMissingSchemaError`, which is exactly
+  // the fail-closed rule `packages/backend-data/AGENTS.md` states and which
+  // `dav-store`'s `getDeadProperties` already follows. Everything else rethrows.
   const registered = await deps
     .userEmailDAO()
     .then((dao) => dao.get(normalized))
-    // Registry absent on a database that has not run 0004.
-    .catch(() => null);
+    .catch((error: unknown) => {
+      if (isMissingSchemaError(error)) return null;
+      throw error;
+    });
   if (registered) {
-    return registered.is_verified === 1 ? summarize(await userDAO.getById(registered.user_id).catch(() => null)) : null;
+    return registered.is_verified === 1 ? summarize(await userDAO.getById(registered.user_id)) : null;
   }
   // No registry row at all. Safe to fall through: migration 0004 backfilled a
   // verified row for every anchor, so a row-less address is either new or on a
   // pre-0004 database, where the address *is* the anchor.
-  const byCurrent = await userDAO.getByCurrentEmail(normalized).catch(() => null);
-  const legacy = byCurrent ?? (await userDAO.getByEmail(normalized).catch(() => null));
+  //
+  // No `.catch` on either: a failed `users` read is an outage, and reporting it
+  // as "no such account" would turn a D1 blip into a 404 and a spurious
+  // re-registration attempt. Both reads below only run when the registry
+  // genuinely has no row for this address.
+  const byCurrent = await userDAO.getByCurrentEmail(normalized);
+  const legacy = byCurrent ?? (await userDAO.getByEmail(normalized));
   return summarize(legacy);
 }
 
@@ -126,8 +150,13 @@ export async function registerAccount(
   await deps
     .userEmailDAO()
     .then((dao) => dao.register({ email: loginEmail, userId: id, isVerified: true, now }))
-    .catch(() => {
-      // Registry absent (database predating 0004): the anchor is the address.
+    .catch((error: unknown) => {
+      // Pre-0004 registry only, per the same rule `resolveAccount` follows: a
+      // missing table is tolerated, a failed write is not. Swallowing the second
+      // would return an account the address registry has never heard of, which
+      // resolves to nothing on the next login.
+      if (isMissingSchemaError(error)) return;
+      throw error;
     });
   return resolveAccount(deps, loginEmail);
 }

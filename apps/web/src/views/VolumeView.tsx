@@ -4,7 +4,7 @@ import { useTranslation } from 'react-i18next';
 import { ChevronRight, Plus, Upload } from 'lucide-react';
 import type { VolumeDetail } from '../types';
 import { parentDavPath, stripSlashes } from '../lib/davXml';
-import { clampPage, readStoredPageSize, storePageSize } from '../lib/davPage';
+import { clampPage, hasPendingPageCorrection, readStoredPageSize, storePageSize } from '../lib/davPage';
 import { Button } from '../components/ui/Button';
 import { Card, CardHeader, CardTitle } from '../components/ui/Card';
 import { ContextBar } from '../components/layout/ContextBar';
@@ -17,6 +17,7 @@ import { useVolumeMutations } from './volume/useVolumeMutations';
 import { VolumeFileList } from './volume/VolumeFileList';
 import { VolumeFileModals } from './volume/VolumeFileModals';
 import { VolumeFilePager } from './volume/VolumeFilePager';
+import { VolumeOverwritePrompt } from './volume/VolumeOverwritePrompt';
 
 /**
  * Normalise a `?path=` query value into a safe volume-relative path.
@@ -96,14 +97,16 @@ function VolumeView({ showNotice }: { showNotice: (type: 'success' | 'error', te
   );
 
   const setPage = useCallback(
-    (next: number) => {
+    (next: number, options: { replace?: boolean } = {}) => {
       const nextParams: Record<string, string> = {};
       if (path !== '') nextParams['path'] = path;
       if (activeTab === 'settings') nextParams['tab'] = 'settings';
       if (next > 1) nextParams['page'] = String(next);
-      // Correcting a stale link replaces rather than pushes, so the back button
-      // does not walk straight back into the page that needed correcting.
-      setParams(nextParams, { replace: next === 1 });
+      // A user-initiated page change pushes; a correction of a stale link
+      // replaces, so Back does not walk straight back into the page that needed
+      // correcting. Passed in rather than inferred from `next === 1`, because
+      // correcting `?page=5` to page 3 must also replace.
+      setParams(nextParams, { replace: options.replace ?? false });
     },
     [setParams, path, activeTab],
   );
@@ -113,9 +116,20 @@ function VolumeView({ showNotice }: { showNotice: (type: 'success' | 'error', te
   // shrank) would otherwise leave the address bar disagreeing with the rows on
   // screen. Put the served page in the URL once the rows have settled.
   useEffect(() => {
-    if (status !== 'ready' || !paging.paged || paging.page === page) return;
-    setPage(paging.page);
-  }, [status, paging.paged, paging.page, page, setPage]);
+    if (
+      !hasPendingPageCorrection({
+        status,
+        paged: paging.paged,
+        requestedPage: page,
+        resolvedPage: paging.page,
+        requestedLimit: pageSize,
+        resolvedLimit: paging.limit,
+      })
+    ) {
+      return;
+    }
+    setPage(paging.page, { replace: true });
+  }, [status, paging.paged, paging.page, paging.limit, page, pageSize, setPage]);
 
   // Changing the page size keeps the first row on screen: switching 100 -> 250
   // while on page 3 should show rows 1-250, not 501-750 of a list the user was
@@ -138,6 +152,14 @@ function VolumeView({ showNotice }: { showNotice: (type: 'success' | 'error', te
             <Link
               to={`/${owner}/${volume}`}
               onClick={() => {
+                // `setTab('files')` already omits `tab`, and `setPath('')` is the
+                // reset-to-the-volume-root action. Skipping both while already at
+                // the root keeps the breadcrumb from pushing a duplicate history
+                // entry on every click of the link you are already on.
+                if (path === '' && activeTab !== 'settings') {
+                  return;
+                }
+
                 setTab('files');
                 setPath('');
               }}
@@ -234,16 +256,27 @@ function VolumeView({ showNotice }: { showNotice: (type: 'success' | 'error', te
               onDuplicate={(e) => void mutations.doDuplicate(e)}
               onDelete={(e) => mutations.setDeleting(e)}
             />
-            {activeTab === 'files' && (
-              <VolumeFilePager
-                page={paging.page}
-                limit={pageSize}
-                total={paging.total}
-                paged={paging.paged}
-                onPageChange={setPage}
-                onPageSizeChange={changePageSize}
+            {mutations.overwritePrompt && (
+              <VolumeOverwritePrompt
+                name={mutations.overwritePrompt.label}
+                busy={mutations.busy}
+                onConfirm={() => void mutations.confirmOverwrite()}
+                onCancel={mutations.cancelOverwrite}
               />
             )}
+            {/* `activeTab === 'files'` is implied — this branch only renders on
+                that tab. `hasEntries` inside the pager is the real gate: a folder
+                that failed to load has no rows and its `total` belongs to
+                whichever folder loaded last. */}
+            <VolumeFilePager
+              entries={entries}
+              page={paging.page}
+              limit={paging.limit}
+              total={paging.total}
+              paged={paging.paged}
+              onPageChange={setPage}
+              onPageSizeChange={changePageSize}
+            />
           </Card>
           <VolumeFileModals
             busy={mutations.busy}

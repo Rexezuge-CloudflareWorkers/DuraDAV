@@ -11,19 +11,21 @@ import type { ViewerIdentity } from './volumeOwnership';
  */
 type DavPermission = 'admin' | 'read';
 
-interface DavPermissionServiceEnv {
-  DB?: unknown;
-}
-
-// Owner-only Policy: owner is implicit admin, public buckets allow anon
-// reads, private buckets hide existence. No collaborators, orgs, or grants.
+// Owner-only Policy: owner is implicit admin, public buckets allow anon reads,
+// private buckets hide existence. No collaborators, orgs, or grants.
+//
+// No constructor, and no `env` parameter. The previous signature took one and
+// ignored it (`_env`), so every call site and the DI binding had to supply an
+// argument that was never read — and the shape implied a dependency this class
+// does not have. `getRole` is genuinely synchronous (two comparisons over a row
+// already in hand), so it is not wrapped in a resolved promise either: the
+// `await` at each call site already works on a non-promise, and the wrapper only
+// obscured that.
 class DavPermissionService {
-  constructor(_env?: DavPermissionServiceEnv) {}
-
-  public getRole(viewer: ViewerIdentity | null, volume: DavVolumeRow): Promise<DavPermission | null> {
+  public getRole(viewer: ViewerIdentity | null, volume: DavVolumeRow): DavPermission | null {
     const isPrivate = Number(volume.is_private) === 1;
-    if (isVolumeOwner(viewer, volume)) return Promise.resolve('admin');
-    return isPrivate ? Promise.resolve(null) : Promise.resolve('read');
+    if (isVolumeOwner(viewer, volume)) return 'admin';
+    return isPrivate ? null : 'read';
   }
 }
 

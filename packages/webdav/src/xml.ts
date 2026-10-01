@@ -33,6 +33,31 @@ function renderDavProperty(propName: string, value: string): string {
 }
 
 /**
+ * A `207 Multi-Status` body naming the resources a multi-resource operation
+ * failed on.
+ *
+ * RFC 4918 §9.8.3: "If an error occurs with a resource other than the resource
+ * identified in the Request-URI, then the response MUST be a 207
+ * (Multi-Status), and the URL of the resource causing the failure MUST appear
+ * with the specific error." So a COPY that copies 40 of 50 children and drops
+ * 10 on quota cannot answer `201`/`204` — the client is told the copy succeeded
+ * and never learns the 10 files are missing. It has to be able to tell
+ * *which* ones, which is what each `<response>` carries.
+ *
+ * Only the `<status>` arm is emitted: the failure is of the resource itself,
+ * not of one of its properties, so a `<propstat>` wrapper would be a lie.
+ */
+function renderMultiStatusFailures(failures: { href: string; status: string; description?: string }[]): string {
+  const responses = failures
+    .map((failure) => {
+      const reason = failure.description ? `\n${escapeXml(failure.description)}` : '';
+      return `\n<response>\n<href>${escapeXml(failure.href)}</href>\n<status>${escapeXml(failure.status)}</status>${reason}\n</response>`;
+    })
+    .join('');
+  return `<?xml version="1.0" encoding="utf-8"?>\n<D:multistatus xmlns:D="DAV:">${responses}\n</D:multistatus>\n`;
+}
+
+/**
  * `prefix:local` plus the `xmlns` declaration that makes it resolve.
  *
  * The two renderers below differ only in whether the element has content, and
@@ -207,6 +232,7 @@ export {
   renderPropertyElement,
   renderEmptyPropertyElement,
   renderPropstat,
+  renderMultiStatusFailures,
   parsePropfindRequest,
   parseProppatchRequest,
   isValidXmlTagName,

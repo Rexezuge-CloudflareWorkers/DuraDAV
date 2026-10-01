@@ -53,9 +53,96 @@ index f246a8642c6e9fc8115e3deabca814b2a5dcdedf..e13e8ed8f63db18f37bd73566d85dde4
  //# sourceMappingURL=index.d.ts.map
 \ No newline at end of file
 diff --git a/dist/index.js b/dist/index.js
-index 0d02c5b7cd25098da1708e27a7e2bb6e20c75cdc..38590250289db72424ee7ec982b93c084e33d6af 100644
+index 0d02c5b7cd25098da1708e27a7e2bb6e20c75cdc..9e1f821a981471cfce0f37aa9d1f5ad4e9ffb43d 100644
 --- a/dist/index.js
 +++ b/dist/index.js
+@@ -47,14 +47,41 @@ var Fs = class extends RpcTarget {
+ 		} });
+ 	}
+ 	async writeFile(path, data, options) {
++		const deviceSize = this.getDeviceSize();
++		// Bytes the unlink below will free. Measured BEFORE the unlink, because
++		// afterwards there is nothing left to measure, and an overwrite of a
++		// 10 KB file with a 2 MB one needs that 10 KB of headroom.
++		let reclaimed = 0;
++		try {
++			reclaimed = Number(this.stat(path).size ?? 0);
++		} catch {
++			reclaimed = 0;
++		}
++		const spaceUsed = Math.max(0, this.getSpaceUsed() - reclaimed);
++		const enospc = () => Object.assign(new Error("ENOSPC"), { code: "ENOSPC" });
++		// Buffer non-stream payloads up front so the quota decision happens BEFORE
++		// anything is mutated. The original order was unlink -> create -> check,
++		// which made an over-quota write destroy the file it was overwriting and
++		// only then report ENOSPC: a routine failing PUT silently truncated an
++		// existing resource to zero bytes, with no way to recover it.
++		let pending = null;
++		if (typeof data === "string") pending = new TextEncoder().encode(data);
++		else if (data instanceof ArrayBuffer) pending = new Uint8Array(data);
++		else if (ArrayBuffer.isView(data)) pending = new Uint8Array(data.buffer);
++		if (pending !== null && spaceUsed + pending.length > deviceSize) throw enospc();
+ 		try {
+ 			this.unlink(path);
+ 		} catch (e) {
+ 			if (!(e instanceof Error && e.message === "ENOENT")) throw e;
+ 		}
+-		const deviceSize = this.getDeviceSize();
+-		const spaceUsed = this.getSpaceUsed();
+ 		this.create(path);
++		if (pending !== null) {
++			this.write(path, pending, {
++				offset: 0,
++				encoding: options?.encoding
++			});
++			return;
++		}
+ 		if (typeof data === "object" && data !== null && typeof data.getReader === "function") {
+ 			const CHUNK_SIZE = 1024 * 1024;
+ 			let offset = 0;
+@@ -64,7 +91,7 @@ var Fs = class extends RpcTarget {
+ 				const { value, done } = await reader.read();
+ 				if (done) break;
+ 				if (!value) continue;
+-				if (spaceUsed + total + value.length > deviceSize) throw Object.assign(new Error("ENOSPC"), { code: "ENOSPC" });
++				if (spaceUsed + total + value.length > deviceSize) throw enospc();
+ 				this.write(path, value, {
+ 					offset,
+ 					encoding: options?.encoding
+@@ -74,33 +101,6 @@ var Fs = class extends RpcTarget {
+ 			}
+ 			return;
+ 		}
+-		if (typeof data === "string") {
+-			const buf = new TextEncoder().encode(data);
+-			if (spaceUsed + buf.length > deviceSize) throw Object.assign(new Error("ENOSPC"), { code: "ENOSPC" });
+-			this.write(path, buf, {
+-				offset: 0,
+-				encoding: options?.encoding
+-			});
+-			return;
+-		}
+-		if (data instanceof ArrayBuffer) {
+-			const buf = new Uint8Array(data);
+-			if (spaceUsed + buf.length > deviceSize) throw Object.assign(new Error("ENOSPC"), { code: "ENOSPC" });
+-			this.write(path, buf, {
+-				offset: 0,
+-				encoding: options?.encoding
+-			});
+-			return;
+-		}
+-		if (ArrayBuffer.isView(data)) {
+-			const buf = new Uint8Array(data.buffer);
+-			if (spaceUsed + buf.length > deviceSize) throw Object.assign(new Error("ENOSPC"), { code: "ENOSPC" });
+-			this.write(path, buf, {
+-				offset: 0,
+-				encoding: options?.encoding
+-			});
+-			return;
+-		}
+ 		throw new Error("Unsupported data type for writeFile");
+ 	}
+ 	read(path, options) {
 @@ -258,6 +258,42 @@ var Fs = class extends RpcTarget {
  		}
  		return names;
@@ -112,3 +199,4 @@ index 0d02c5b7cd25098da1708e27a7e2bb6e20c75cdc..38590250289db72424ee7ec982b93c08
  //#endregion
  export { Dofs, Fs, withDofs };
  //# sourceMappingURL=index.js.map
+\ No newline at end of file

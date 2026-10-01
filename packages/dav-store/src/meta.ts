@@ -22,9 +22,21 @@ function ensureDavSchema(sql: DurableSqlStorage): void {
       content_type TEXT,
       etag TEXT,
       mtime INTEGER NOT NULL,
-      crtime INTEGER NOT NULL
+      crtime INTEGER NOT NULL,
+      lock_null INTEGER NOT NULL DEFAULT 0
     );
   `);
+  // `CREATE TABLE IF NOT EXISTS` is a no-op on a volume provisioned before
+  // `lock_null` existed, so the column has to be added separately. Guarded on
+  // the "duplicate column" error, which is how SQLite reports the second run —
+  // not on the absence of an error, so a genuinely broken statement still
+  // surfaces. This is a DO-local schema step, not a D1 migration: `dav_nodes`
+  // never exists in D1.
+  try {
+    sql.exec(`ALTER TABLE dav_nodes ADD COLUMN lock_null INTEGER NOT NULL DEFAULT 0;`);
+  } catch (error) {
+    if (!isDuplicateColumnError(error)) throw error;
+  }
   sql.exec(`
     CREATE TABLE IF NOT EXISTS dav_props (
       path TEXT NOT NULL,
@@ -56,6 +68,19 @@ function nowMs(): number {
   return Date.now();
 }
 
+/**
+ * Did this statement fail only because the column is already there?
+ *
+ * The alternative — ignoring the error — would also swallow a genuinely broken
+ * `ALTER`, leaving an old volume permanently without the column while the code
+ * reads it. Only this narrow outcome is forgiven, which mirrors the
+ * fail-closed rule `isMissingSchemaError` exists to enforce.
+ */
+function isDuplicateColumnError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : typeof error === 'string' ? error : '';
+  return /duplicate\s+column\s+name/i.test(message);
+}
+
 function stringField(row: SqlRow, key: string, fallback = ''): string {
   const value = row[key];
   if (typeof value === 'string') return value;
@@ -69,23 +94,34 @@ function nullableStringField(row: SqlRow, key: string): string | undefined {
   return typeof value === 'number' || typeof value === 'boolean' || typeof value === 'bigint' ? String(value) : undefined;
 }
 
+/**
+ * Insert or refresh a node's metadata row.
+ *
+ * `lockNull` is explicit and required because it is the one field whose value
+ * the *caller* owns and cannot be inferred: it marks a resource that exists
+ * only to hold a lock, which `handleUnlock` is then allowed to delete. Every
+ * caller knows its own answer — `PUT`/`MKCOL` say `false`, a LOCK that created
+ * the file says `true` — and it is written on conflict as well as on insert so
+ * that putting real content over a lock-null resource clears the flag.
+ */
 function upsertNode(
   sql: DurableSqlStorage,
   path: string,
-  fields: { isCollection: boolean; contentType?: string; etag?: string; mtime?: number; crtime?: number },
+  fields: { isCollection: boolean; contentType?: string; etag?: string; mtime?: number; crtime?: number; lockNull?: boolean },
 ): void {
   const mtime = fields.mtime ?? nowMs();
   const crtime = fields.crtime ?? mtime;
   sql.exec(
-    `INSERT INTO dav_nodes (path, is_collection, content_type, etag, mtime, crtime)
-     VALUES (?, ?, ?, ?, ?, ?)
-     ON CONFLICT(path) DO UPDATE SET is_collection=excluded.is_collection, content_type=excluded.content_type, etag=excluded.etag, mtime=excluded.mtime`,
+    `INSERT INTO dav_nodes (path, is_collection, content_type, etag, mtime, crtime, lock_null)
+     VALUES (?, ?, ?, ?, ?, ?, ?)
+     ON CONFLICT(path) DO UPDATE SET is_collection=excluded.is_collection, content_type=excluded.content_type, etag=excluded.etag, mtime=excluded.mtime, lock_null=excluded.lock_null`,
     path,
     fields.isCollection ? 1 : 0,
     fields.contentType ?? null,
     fields.etag ?? null,
     mtime,
     crtime,
+    fields.lockNull ? 1 : 0,
   );
 }
 
@@ -106,6 +142,26 @@ function subtreePredicate(path: string): { clause: string; bindings: unknown[] }
 
 const CASCADE_TABLES = ['dav_nodes', 'dav_props', 'dav_locks'] as const;
 
+/**
+ * Tables a MOVE re-paths.
+ *
+ * `dav_locks` is deliberately excluded. RFC 4918 §7.6: "A successful MOVE
+ * request on a write locked resource MUST NOT move the write lock with the
+ * resource." Re-pathing the row therefore did the one thing the RFC forbids —
+ * it carried a lock out of the collection it was taken on and applied it to a
+ * resource in a collection the locker never named. §7.4 adds that an indirectly
+ * locked member moved into an *unlocked* collection is thereafter unlocked,
+ * which is exactly what dropping the row produces.
+ *
+ * §7.6 also requires the converse — the moved resource joins the destination
+ * lock's scope — and that falls out of the guard rather than this function:
+ * `DavLockGuard` matches locks on the path *and its ancestors*, so a member
+ * moved under a locked collection is already covered by that ancestor's row.
+ *
+ * DELETE still cascades all three, so removing a subtree releases its locks.
+ */
+const RENAME_CASCADE_TABLES = ['dav_nodes', 'dav_props'] as const;
+
 function deleteNodeCascade(sql: DurableSqlStorage, path: string): void {
   if (path === '') {
     for (const table of CASCADE_TABLES) sql.exec(`DELETE FROM ${table}`);
@@ -117,10 +173,10 @@ function deleteNodeCascade(sql: DurableSqlStorage, path: string): void {
 
 function renameNodeCascade(sql: DurableSqlStorage, from: string, to: string): void {
   const { clause, bindings } = subtreePredicate(from);
-  for (const table of CASCADE_TABLES) {
+  for (const table of RENAME_CASCADE_TABLES) {
     // The leading `from` segment is replaced by the `to` binding; `SUBSTR`
     // re-anchors the untouched suffix. Only the table name is interpolated and
-    // it comes from the closed `CASCADE_TABLES` set, never from input.
+    // it comes from the closed `RENAME_CASCADE_TABLES` set, never from input.
     sql.exec(`UPDATE ${table} SET path = ? || SUBSTR(path, ?) WHERE ${clause}`, to, from.length + 1, ...bindings);
   }
 }

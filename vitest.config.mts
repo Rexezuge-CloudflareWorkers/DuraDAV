@@ -35,15 +35,15 @@ export default defineConfig({
         // testing could move the number. It is now measured.
         //
         // One enforced global floor, raised 28/23/36/30 (pre-hardening) →
-        // 35/31/41/36 → the current 43/39/50/44. Vitest applies glob-scoped
-        // thresholds per *file* rather than per directory aggregate, so a
-        // per-area floor here would compare every individual module against it.
-        // Separate backend and web floors would need separate Vitest projects.
-        // Never lower to make CI pass.
-        statements: 43,
-        branches: 39,
-        functions: 50,
-        lines: 44,
+        // 35/31/41/36 → 43/39/50/44 → the current 46/41/52/47. Vitest applies
+        // glob-scoped thresholds per *file* rather than per directory aggregate,
+        // so a per-area floor here would compare every individual module against
+        // it. Separate backend and web floors would need separate Vitest
+        // projects. Never lower to make CI pass.
+        statements: 46,
+        branches: 41,
+        functions: 52,
+        lines: 47,
       },
     },
   },

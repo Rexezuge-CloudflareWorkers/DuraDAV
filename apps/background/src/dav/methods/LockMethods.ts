@@ -25,6 +25,12 @@ interface LockDeps {
   sql: DurableSqlStorage;
   writeEmptyFile: (innerPath: string) => Promise<boolean>;
   statIsDirectory: (innerPath: string) => boolean;
+  /**
+   * Remove a resource. Injected for the same reason as `writeEmptyFile` — LOCK
+   * now has to undo its own creation when a later validation rejects the
+   * request, and a rejected LOCK must leave nothing behind.
+   */
+  unlink: (innerPath: string) => void;
 }
 
 /**
@@ -85,6 +91,46 @@ async function handleLock(request: Request, innerPath: string, bases: DavBases, 
   let existing: LockDetails | undefined;
   let activePath = innerPath;
   let resourceExists = repo.statInner(innerPath).exists;
+  // Whether this request is the one that brings the resource into existence,
+  // which decides whether a later rejection has something to undo. Captured
+  // before `writeEmptyFile` runs; a refresh (`body === ''`) never creates.
+  const resourceWasPresentAtEntry = resourceExists;
+  // §7.4: "If a depth-infinity write LOCK request is issued to a collection
+  // containing member URLs identifying resources that are currently locked in a
+  // manner that conflicts with the new lock … the request MUST fail with a 423
+  // (Locked) status code."
+  //
+  // Only the lock *root* was consulted before, and `assertLock` above walks
+  // ancestors — so a lock held on `/a/b.txt` was invisible to `LOCK /a` with
+  // `Depth: infinity`, and the INSERT succeeded. The result was two mutually
+  // exclusive locks over one resource: the holder of the child lock was refused
+  // on write by `DavLockGuard`, while `lockdiscovery` advertised only the
+  // collection lock, so its client saw no reason for the 423. This is the
+  // mirror image of the descendant scan `handleDelete` and `handleMove` run.
+  //
+  // Checked before the resource is created below, so a rejected request leaves
+  // nothing behind.
+  if (depthHeader === 'infinity' && repo.statInner(innerPath).isDirectory) {
+    let descendants: string[];
+    try {
+      descendants = repo.requireRecursive(innerPath);
+    } catch {
+      // Cannot enumerate, so cannot prove there is no conflict. §7.4 makes this
+      // a MUST-refuse; an unverifiable answer is not a pass.
+      return new Response('Internal Server Error', { status: 500 });
+    }
+    const tokens = getRequestLockTokens(request);
+    for (const name of descendants) {
+      const childInner = repo.childInner(innerPath, name);
+      const conflicting = locks
+        .activeTokensForPath(childInner, tokens)
+        .filter((token) => requestedScope === 'exclusive' || token.scope === 'exclusive');
+      if (conflicting.length > 0) {
+        return new Response('Locked', { status: 423 });
+      }
+    }
+  }
+
   if (body === '') {
     const tokens = getRequestLockTokens(request);
     for (let cur = innerPath; ; cur = getParentPath(cur)) {
@@ -133,7 +179,7 @@ async function handleLock(request: Request, innerPath: string, bases: DavBases, 
     if (body === '') return new Response('Bad Request', { status: 400 });
     const parent = getParentPath(innerPath);
     if (parent !== '' && !repo.statInner(parent).isDirectory) return new Response('Conflict', { status: 409 });
-    if (request.url.endsWith('/')) return new Response('Conflict', { status: 409 });
+    if (new URL(request.url).pathname.endsWith('/')) return new Response('Conflict', { status: 409 });
     const created = await deps.writeEmptyFile(innerPath);
     if (!created) return new Response('Conflict', { status: 409 });
     resourceExists = true;
@@ -149,8 +195,24 @@ async function handleLock(request: Request, innerPath: string, bases: DavBases, 
   // RFC 4918 §9.10.3: `Depth: infinity` MUST NOT be submitted on a
   // non-collection. Accepting it created an infinity-depth row on a file,
   // which the ancestor walk then treated as covering nonexistent children.
+  //
+  // This was checked *after* `writeEmptyFile` above, so the request created a
+  // 0-byte file and then answered 400 — a failed request that left behind the
+  // very resource it refused to lock, visible to the next PROPFIND and
+  // unlocked. Order matters: validate, then create. The check stays (an
+  // infinity-depth row on a file is meaningless), it just runs first.
   const targetIsCollection = deps.statIsDirectory(activePath);
   if (!targetIsCollection && depthHeader === 'infinity') {
+    if (!resourceWasPresentAtEntry) {
+      // Undo the creation this request performed, so a rejected LOCK leaves
+      // nothing behind.
+      try {
+        deps.unlink(innerPath);
+        repo.deleteCascade(innerPath);
+      } catch {
+        // Best-effort; the 400 below is the answer either way.
+      }
+    }
     return new Response('Bad Request', { status: 400 });
   }
 
@@ -246,12 +308,23 @@ async function handleUnlock(request: Request, innerPath: string, deps: UnlockDep
     return new Response('Conflict', { status: 409 });
   }
 
-  // RFC 4918 §9.11.2: a lock-null resource (the empty file created to hold a
-  // lock on a not-yet-existing path) SHOULD be removed when the lock goes
-  // away. Otherwise every abandoned LOCK leaves a phantom zero-byte file.
+  // Clean up a lock-null resource — but only one that is *actually* a lock-null
+  // resource. RFC 4918 §7.3: "A resource created with a LOCK … behaves the same
+  // way as a resource created by a PUT request with an empty body" — so
+  // "is it zero bytes" cannot tell the two apart, and using that as the test
+  // deleted every empty file the moment its lock was released. The standard
+  // client cycle is PUT(empty) -> LOCK -> UNLOCK (§6.2), so an ordinary empty
+  // document was destroyed by the ordinary way of editing it.
+  //
+  // `dav_nodes.lock_null` is the discriminator: `VolumeTransfer.writeEmptyFile`
+  // sets it, `upsertNode` clears it as soon as real content is written.
+  // §7.3 says such a resource "SHOULD NOT disappear when its lock goes away";
+  // the deprecated lock-null model of Appendix D says it should. Dropping the
+  // row is the conforming choice and leaves an abandoned LOCK's file behind,
+  // which a later LOCK or PUT overwrites harmlessly.
   if (innerPath !== '' && !st.isDirectory && st.size === 0) {
     const remaining = readLocks(sql, innerPath);
-    if (remaining.length === 0) {
+    if (remaining.length === 0 && repo.isLockNull(innerPath)) {
       try {
         unlink(innerPath);
         repo.deleteCascade(innerPath);
