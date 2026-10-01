@@ -19,7 +19,7 @@
     "@durable-dav/shared": "workspace:*"
   },
   "devDependencies": {
-    "@cloudflare/workers-types": "5.20260921.1",
+    "@cloudflare/workers-types": "5.20260928.1",
     "@types/node": "26.6.3",
     "typescript": "6.0.3"
   }
