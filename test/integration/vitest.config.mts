@@ -56,6 +56,13 @@ export default defineConfig({
   resolve: {
     alias: [
       { find: /^@durable-dav\/background$/, replacement: `${backgroundSrcPath}/index.ts` },
+      // Subpath exports (`@durable-dav/background/replication`). The bare-prefix
+      // alias below cannot serve them: it maps the specifier to the package *root*,
+      // so `background/replication` resolves to `src/replication`, which is not a
+      // module. These must precede it.
+      { find: /^@durable-dav\/background\/(.*)$/, replacement: `${backgroundSrcPath}/$1` },
+      { find: /^@durable-dav\/shared\/net$/, replacement: `${sharedSrcPath}/net/index.ts` },
+      { find: /^@durable-dav\/shared\/(.*)$/, replacement: `${sharedSrcPath}/$1` },
       { find: /^@durable-dav\/backend-data$/, replacement: `${backendDataSrcPath}/index.ts` },
       { find: /^@durable-dav\/backend-errors$/, replacement: `${backendErrorsSrcPath}/index.ts` },
       { find: /^@durable-dav\/backend-runtime$/, replacement: `${backendRuntimeSrcPath}/index.ts` },

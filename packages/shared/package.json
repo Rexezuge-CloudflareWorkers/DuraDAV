@@ -12,7 +12,9 @@
     "./model": "./src/model/index.ts",
     "./model/*": "./src/model/*.ts",
     "./utils": "./src/utils/index.ts",
-    "./utils/*": "./src/utils/*.ts"
+    "./utils/*": "./src/utils/*.ts",
+    "./net": "./src/net/index.ts",
+    "./net/*": "./src/net/*.ts"
   },
   "scripts": {
     "typecheck": "tsc --noEmit"

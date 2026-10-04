@@ -1,5 +1,5 @@
 // Service bindings for the per-request composition root.
-import type { DavCredentialDAO, DavVolumeDAO, NamespaceDAO, UserDAO, UserEmailDAO } from '@durable-dav/backend-data/dao';
+import type { DavCredentialDAO, DavReplicationConflictDAO, DavReplicationDAO, DavVolumeDAO, NamespaceDAO, UserDAO, UserEmailDAO } from '@durable-dav/backend-data/dao';
 import type { Container, Token } from '@durable-dav/backend-runtime/di';
 import { UserIdentityService } from '../identity/UserIdentityService';
 import { Tokens } from './tokens';
@@ -16,6 +16,8 @@ function bindServiceBindings(scope: Container, env: RequestScopeEnv): void {
     namespaceDAO: getDao<NamespaceDAO>(Tokens.NamespaceDAO),
     davVolumeDAO: getDao<DavVolumeDAO>(Tokens.DavVolumeDAO),
     davCredentialDAO: getDao<DavCredentialDAO>(Tokens.DavCredentialDAO),
+    davReplicationDAO: getDao<DavReplicationDAO>(Tokens.DavReplicationDAO),
+    davReplicationConflictDAO: getDao<DavReplicationConflictDAO>(Tokens.DavReplicationConflictDAO),
   };
 
   // One identity resolver per request scope, shared by `VolumeService` and any

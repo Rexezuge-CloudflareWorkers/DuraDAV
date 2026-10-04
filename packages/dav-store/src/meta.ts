@@ -140,6 +140,23 @@ function subtreePredicate(path: string): { clause: string; bindings: unknown[] }
   return { clause: '(path = ? OR SUBSTR(path, 1, ?) = ?)', bindings: [path, path.length + 1, `${path}/`] };
 }
 
+/**
+ * Tables a DELETE cascades through.
+ *
+ * `dav_replica_state` is deliberately **absent**, and that is the opposite of the
+ * rule that governs `RENAME_CASCADE_TABLES` below. A MOVE moves the bytes, so the
+ * record of where the two trees agreed must move with them. A DELETE moves nothing:
+ * it removes the resource, and the record of that removal is the *only* evidence
+ * the sync engine has that the path ever existed and is now gone.
+ *
+ * Cascading the row away on DELETE destroys that evidence, and the next pass reads
+ * the surviving remote copy as a brand-new file and pulls it back — resurrecting a
+ * file the user deleted, on a replication that reports itself perfectly healthy.
+ * The leftover rows are not orphans: a path absent from both sides is forgotten by
+ * the sync, and a path absent from one side is exactly the deletion queue.
+ *
+ * `dav_locks` *is* cascaded; RFC 4918 §7.4 releases a deleted subtree's locks.
+ */
 const CASCADE_TABLES = ['dav_nodes', 'dav_props', 'dav_locks'] as const;
 
 /**
@@ -158,9 +175,14 @@ const CASCADE_TABLES = ['dav_nodes', 'dav_props', 'dav_locks'] as const;
  * `DavLockGuard` matches locks on the path *and its ancestors*, so a member
  * moved under a locked collection is already covered by that ancestor's row.
  *
- * DELETE still cascades all three, so removing a subtree releases its locks.
+ * `dav_replica_state` is included, and `CASCADE_TABLES` above explains why the two
+ * lists disagree about it: a MOVE relocates the resource, so its base row relocates
+ * with it, while a DELETE removes the resource and must *keep* the row, because
+ * that row is what lets the sync propagate the deletion to the other side.
+ *
+ * DELETE still cascades locks, so removing a subtree releases them.
  */
-const RENAME_CASCADE_TABLES = ['dav_nodes', 'dav_props'] as const;
+const RENAME_CASCADE_TABLES = ['dav_nodes', 'dav_props', 'dav_replica_state'] as const;
 
 function deleteNodeCascade(sql: DurableSqlStorage, path: string): void {
   if (path === '') {
@@ -208,5 +230,5 @@ function getDeadProperties(sql: DurableSqlStorage, path: string): DeadProperty[]
   }));
 }
 
-export { ensureDavSchema, upsertNode, deleteNodeCascade, renameNodeCascade, getDeadProperties };
+export { ensureDavSchema, upsertNode, deleteNodeCascade, renameNodeCascade, getDeadProperties, subtreePredicate };
 export type { DurableSqlStorage };

@@ -87,3 +87,52 @@ export interface DavEntry {
   lastModified: string | null;
   etag: string | null;
 }
+
+/**
+ * One configured replication target.
+ *
+ * `passInFlight` is not cosmetic: a non-null value is the server's deletion
+ * gate, so the UI can explain *why* a deletion has not propagated yet instead of
+ * leaving the owner to wonder whether it is broken.
+ */
+export interface BucketReplication {
+  replicationId: string;
+  targetKind: 'dav' | 'dav-volume';
+  remoteUrl: string;
+  remoteOwner: string;
+  remoteVolume: string;
+  remotePath: string;
+  authKind: 'none' | 'basic' | 'bearer';
+  mode: 'copy-only' | 'sync' | 'keep-both';
+  intervalMinutes: number;
+  enabled: boolean;
+  lastRunAt: number | null;
+  lastStatus: 'ok' | 'partial' | 'failed' | null;
+  lastError: string | null;
+  consecutiveFailures: number;
+  passInFlight: boolean;
+  createdAt: number;
+  updatedAt: number;
+}
+
+/**
+ * One recorded sync decision worth explaining.
+ *
+ * `kind: 'deletion'` means a deletion was propagated between the two sides.
+ * Those are recorded as well as conflicts precisely because they are the
+ * irreversible ones.
+ */
+export interface ReplicationConflict {
+  conflictId: string;
+  path: string;
+  winner: 'local' | 'remote';
+  /**
+  Where the losing version was preserved, when the mode preserves it.
+  */
+  keptPath: string | null;
+  kind: 'conflict' | 'deletion';
+  detectedAt: number;
+  resolvedAt: number | null;
+}
+
+export type CreatedBucketReplication = BucketReplication;

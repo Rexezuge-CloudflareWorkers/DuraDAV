@@ -9,6 +9,7 @@ import { Label, Textarea } from '../ui/Input';
 import { RefreshButton } from '../shared/RefreshButton';
 import { TypeToConfirmModal } from '../modals/TypeToConfirmModal';
 import { VolumeCredentialsCard } from './VolumeCredentialsCard';
+import { VolumeReplicationCard } from './VolumeReplicationCard';
 import { HrefPrefixModeCard } from './HrefPrefixModeCard';
 
 export function VolumeSettingsTab({
@@ -144,6 +145,13 @@ export function VolumeSettingsTab({
       )}
 
       <VolumeCredentialsCard owner={owner} volume={volume} showNotice={showNotice} />
+
+      {/*
+        Replication sits above the Danger Zone, not inside it: adding a target is
+        not destructive, but it is the setting whose *consequences* are, and the
+        mode selector has to be readable before someone picks one.
+      */}
+      <VolumeReplicationCard owner={owner} volume={volume} showNotice={showNotice} />
 
       <Card className="border-[var(--color-error-text)]/40">
         <CardHeader>

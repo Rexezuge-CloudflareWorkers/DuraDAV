@@ -8,6 +8,8 @@
     ".": "./src/index.ts",
     "./dao": "./src/dao/index.ts",
     "./dao/*": "./src/dao/*.ts",
+    "./crypto": "./src/crypto/index.ts",
+    "./crypto/*": "./src/crypto/*.ts",
     "./utils": "./src/utils/index.ts",
     "./utils/*": "./src/utils/*.ts"
   },

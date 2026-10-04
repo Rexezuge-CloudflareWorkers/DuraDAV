@@ -50,6 +50,7 @@ export default defineConfig({
   resolve: {
     alias: [
       { find: /^@durable-dav\/background$/, replacement: `${backgroundSrcPath}/index.ts` },
+      { find: /^@durable-dav\/background\/(.*)$/, replacement: `${backgroundSrcPath}/$1` },
       { find: /^@durable-dav\/backend-data$/, replacement: `${backendDataSrcPath}/index.ts` },
       { find: /^@durable-dav\/backend-errors$/, replacement: `${backendErrorsSrcPath}/index.ts` },
       { find: /^@durable-dav\/backend-runtime$/, replacement: `${backendRuntimeSrcPath}/index.ts` },
@@ -58,6 +59,8 @@ export default defineConfig({
       { find: /^@durable-dav\/dav-store$/, replacement: `${davStoreSrcPath}/index.ts` },
       { find: /^@durable-dav\/shared$/, replacement: `${sharedSrcPath}/index.ts` },
       { find: '@durable-dav/background', replacement: backgroundSrcPath },
+      { find: /^@durable-dav\/shared\/net$/, replacement: `${sharedSrcPath}/net/index.ts` },
+      { find: /^@durable-dav\/shared\/(.*)$/, replacement: `${sharedSrcPath}/$1` },
       { find: '@durable-dav/backend-data', replacement: backendDataSrcPath },
       { find: '@durable-dav/backend-errors', replacement: backendErrorsSrcPath },
       { find: '@durable-dav/backend-runtime', replacement: backendRuntimeSrcPath },

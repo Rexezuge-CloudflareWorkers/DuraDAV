@@ -27,6 +27,24 @@ declare global {
     @deprecated Git-template leftover; `DAV_CACHE_TTL_SECONDS` wins when set.
     */
     GIT_CACHE_TTL_SECONDS?: string;
+    /**
+    Base64 of 32 bytes. Required to store a remote WebDAV target's credential:
+    the Worker has to *present* that password on every sync, so unlike a bucket
+    credential it cannot be a one-way hash. Absent means replications with a
+    credential cannot be created, and the failure is reported rather than
+    silently storing the secret in the clear.
+    */
+    REPLICATION_ENCRYPTION_KEY?: string;
+    REPLICATION_ALLOWED_HOSTS?: string;
+    REPLICATION_SWEEP_LIMIT?: string;
+    REPLICATION_SLICE_PATHS?: string;
+    REPLICATION_SLICE_BYTES?: string;
+    REPLICATION_SLICE_MS?: string;
+    REPLICATION_PASS_MAX_MS?: string;
+    REPLICATION_TIMEOUT_MS?: string;
+    REPLICATION_HASH_ON_AMBIGUOUS?: string;
+    MAX_REPLICATION_FAILURES?: string;
+    MAX_REPLICATIONS_PER_VOLUME?: string;
   }
 
   type CloudflareEnv = Env;

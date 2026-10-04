@@ -4,3 +4,4 @@ export * from './locks';
 export * from './constants';
 export * from './props';
 export * from './body';
+export * from './multistatus';

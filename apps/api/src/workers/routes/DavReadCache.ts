@@ -1,5 +1,5 @@
 import type { KvCache } from '@durable-dav/backend-runtime/kv';
-import { digest128 } from '@durable-dav/backend-runtime/kv';
+import { digest128, invalidateDavVolumeCaches } from '@durable-dav/backend-runtime/kv';
 import { normalizeVolumeKey } from '@durable-dav/webdav';
 
 // KV-backed read cache for DAV RPCs (Git `RepoReadCache` pattern).
@@ -216,17 +216,7 @@ async function putCachedFile(
 }
 
 async function invalidateVolumeCaches(cache: KvCache, owner: string, volume: string): Promise<void> {
-  const key = cacheKeyForVolume(owner, volume);
-  try {
-    await cache.purgePrefix('davProp', [key]);
-  } catch {
-    // Best-effort invalidation.
-  }
-  try {
-    await cache.purgePrefix('davFile', [key]);
-  } catch {
-    // Best-effort invalidation.
-  }
+  await invalidateDavVolumeCaches(cache, cacheKeyForVolume(owner, volume));
   // No `davMeta` sweep: the per-volume *detail* snapshot this used to drop is
   // gone — `VolumeDetail` serves straight from the row its ownership guard
   // already loaded, because the guard had to read D1 anyway and so the cache

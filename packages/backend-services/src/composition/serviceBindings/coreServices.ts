@@ -11,6 +11,7 @@ import { AccessAuthService } from '../../auth/AccessAuthService';
 import { DavPermissionService } from '../../dav/DavPermissionService';
 import { VolumeService } from '../../dav/VolumeService';
 import { VolumeCredentialService } from '../../dav/VolumeCredentialService';
+import { VolumeReplicationService } from '../../dav/VolumeReplicationService';
 import { UserService } from '../../user/UserService';
 import { AppConfiguration } from '@durable-dav/backend-runtime/config';
 import type { Container } from '@durable-dav/backend-runtime/di';
@@ -42,6 +43,15 @@ function bindCoreServices(scope: Container, { env, daos, identity }: ServiceGrou
   scope.bind(Tokens.VolumeCredentialService, () =>
     createService(VolumeCredentialService, env, {
       credentialDAO: daos.davCredentialDAO,
+    }),
+  );
+  // Replication reads `REPLICATION_ENCRYPTION_KEY` off the env, not through
+  // `AppConfiguration` — it is a secret, and the config facade reports numbers
+  // and policy while secrets stay out of `validate()`'s numeric sweep.
+  scope.bind(Tokens.VolumeReplicationService, () =>
+    createService(VolumeReplicationService, env, {
+      replicationDAO: daos.davReplicationDAO,
+      conflictDAO: daos.davReplicationConflictDAO,
     }),
   );
 }

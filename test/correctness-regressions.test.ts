@@ -121,18 +121,38 @@ describe('metadata cascade prefix matching is wildcard-free', () => {
     expect(statements[0]?.bindings).toEqual(['report_2024', 'report_2024'.length + 1, 'report_2024/']);
   });
 
+  it('keeps the replication base when a resource is deleted', () => {
+    // `dav_replica_state` records where two trees last agreed, and for a DELETE that
+    // record is the only evidence the path ever existed and is now gone. Cascading
+    // it away lets the next sync pass read the surviving remote copy as a brand-new
+    // file and pull it back — resurrecting what the user just deleted, while the
+    // replication reports itself healthy. So the two cascade lists disagree about
+    // this table on purpose.
+    const { statements, sql } = recordingSql();
+    deleteNodeCascade(sql, 'gone');
+    expect(statements.map((entry) => entry.sql)).not.toContain('DELETE FROM dav_replica_state WHERE (path = ? OR SUBSTR(path, 1, ?) = ?)');
+    expect(statements).toHaveLength(3);
+  });
+
   it('renames a subtree with the same wildcard-free predicate', () => {
     const { statements, sql } = recordingSql();
     renameNodeCascade(sql, 'a_b', 'a_b2');
-    // Two tables, not three: RFC 4918 §7.6 — "A successful MOVE request on a
+    // `dav_locks` is excluded, per RFC 4918 §7.6: "A successful MOVE request on a
     // write locked resource MUST NOT move the write lock with the resource."
-    // Re-pathing `dav_locks` carried the lock out of the collection it was
-    // taken on and onto a resource in a collection the locker never named.
-    expect(statements).toHaveLength(2);
+    // Re-pathing it carried a lock out of the collection it was taken on and onto a
+    // resource in a collection the locker never named.
+    //
+    // `dav_replica_state` *is* re-pathed, for the reason above: it travels with
+    // the bytes rather than being left behind to describe a path that no longer
+    // exists. So three tables, one of them specifically not `dav_locks`.
+    expect(statements).toHaveLength(3);
     for (const { sql: text } of statements) {
       expect(text).not.toContain('LIKE');
       expect(text).not.toContain('dav_locks');
     }
+    expect(statements.map((entry) => entry.sql)).toContain(
+      'UPDATE dav_replica_state SET path = ? || SUBSTR(path, ?) WHERE (path = ? OR SUBSTR(path, 1, ?) = ?)',
+    );
     // `to` and the suffix offset come first, then the subtree bindings.
     expect(statements[0]?.bindings).toEqual(['a_b2', 'a_b'.length + 1, 'a_b', 'a_b'.length + 1, 'a_b/']);
   });
