@@ -1,4 +1,12 @@
-import { DavCredentialDAO, DavVolumeDAO, NamespaceDAO, UserDAO, UserEmailDAO } from '@durable-dav/backend-data/dao';
+import {
+  DavCredentialDAO,
+  DavReplicationConflictDAO,
+  DavReplicationDAO,
+  DavVolumeDAO,
+  NamespaceDAO,
+  UserDAO,
+  UserEmailDAO,
+} from '@durable-dav/backend-data/dao';
 import { Container } from '@durable-dav/backend-runtime/di';
 import type { Token } from '@durable-dav/backend-runtime/di';
 import { Tokens } from './tokens';
@@ -44,6 +52,8 @@ function bindDaoBindings(scope: Container, env: RequestScopeEnv): void {
   bindDao(scope, Tokens.NamespaceDAO, () => Promise.resolve(new NamespaceDAO(env.DB)));
   bindDao(scope, Tokens.DavVolumeDAO, () => Promise.resolve(new DavVolumeDAO(env.DB)));
   bindDao(scope, Tokens.DavCredentialDAO, () => Promise.resolve(new DavCredentialDAO(env.DB)));
+  bindDao(scope, Tokens.DavReplicationDAO, () => Promise.resolve(new DavReplicationDAO(env.DB)));
+  bindDao(scope, Tokens.DavReplicationConflictDAO, () => Promise.resolve(new DavReplicationConflictDAO(env.DB)));
 }
 
 export { bindDaoBindings };

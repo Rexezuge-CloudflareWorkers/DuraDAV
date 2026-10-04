@@ -71,6 +71,9 @@
     },
   ],
   "triggers": {
+    // Unchanged by replication. The work is sliced, so replication shares the
+    // existing 10-minute tick rather than needing a schedule of its own — which
+    // also means `CronTasksWorker`'s per-cron single-flight map is untouched.
     "crons": ["*/10 * * * *"],
   },
   // No DEV_AUTH_EMAIL / DEMO_MODE here on purpose. Those are authentication
@@ -110,5 +113,47 @@
     // large enough file set can fill the namespace. `KvCache.putText` treats
     // an over-quota write as a soft miss, so it degrades rather than erroring.
     "DAV_CACHE_TTL_SECONDS": "86400",
+    // --- Scheduled replication -------------------------------------------
+    // Every budget below exists because `CronTasksWorker` runs all tasks in one
+    // Durable Object invocation, and a two-way sync of a large bucket does not
+    // fit in it. A tick visits at most SLICE_PATHS collections, moves at most
+    // SLICE_BYTES, and spends at most SLICE_MS; it parks its cursor in D1 and
+    // the next tick continues.
+    //
+    // Raising SLICE_PATHS without raising SLICE_MS is the change that turns a
+    // slow sync into a timed-out one, which looks identical to a broken target.
+    "MAX_REPLICATIONS_PER_VOLUME": "10",
+    "REPLICATION_SWEEP_LIMIT": "10",
+    "REPLICATION_SLICE_PATHS": "200",
+    "REPLICATION_SLICE_BYTES": "33554432",
+    "REPLICATION_SLICE_MS": "20000",
+    // Bounds how long a pass may stay open. Not a performance knob: it is the
+    // deletion gate's staleness bound. A pass wedged on one erroring path would
+    // otherwise defer every deletion in the tree forever with nothing to report.
+    "REPLICATION_PASS_MAX_MS": "600000",
+    "MAX_REPLICATION_FAILURES": "5",
+    "REPLICATION_TIMEOUT_MS": "30000",
+    // Hash both sides when their validators disagree but their sizes match. Off
+    // by default: it costs two full reads per ambiguous file, and the cheaper
+    // alternative it guards against — assuming equal size means equal content —
+    // silently drops one side's edit.
+    "REPLICATION_HASH_ON_AMBIGUOUS": "false",
+    // Comma-separated hosts exempt from the egress policy, which otherwise
+    // refuses loopback, link-local, and RFC 1918 targets. Empty by default.
+    //
+    // This is a widening of the SSRF boundary and `AppConfiguration.validate()`
+    // warns when it is set in production. It exists because the most common
+    // replication target in practice is a self-hosted server on a private
+    // network, and a policy with no way to permit it would make the feature
+    // unusable exactly where it is wanted. Note it does not help a target that
+    // is a sibling bucket — those go through `DavVolumeRemote`, which never
+    // touches the network.
+    //
+    // REPLICATION_ENCRYPTION_KEY is a *secret*, not a var, and so is absent here
+    // on purpose. It is required to store a remote target's credential: the
+    // Worker must present that password on every sync, so unlike a bucket
+    // credential it cannot be a one-way hash. Generate with
+    // `generateReplicationKey()` and `wrangler secret put REPLICATION_ENCRYPTION_KEY`.
+    "REPLICATION_ALLOWED_HOSTS": "",
   },
 }

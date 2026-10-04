@@ -12,6 +12,7 @@ import { registerDavRoutes } from './routes/DavRoutes';
 import { registerVolumeRoutes } from './routes/VolumeRoutes';
 import { registerVolumeBrowserRoutes } from './routes/VolumeBrowserRoutes';
 import { registerCredentialRoutes } from './routes/CredentialRoutes';
+import { registerReplicationRoutes } from './routes/ReplicationRoutes';
 import { registerUserProfileRoutes } from './routes/UserRoutes';
 import { SPA_HTML } from '@/generated/spa-shell';
 import { acceptsHtml } from './acceptsHtml';
@@ -83,6 +84,7 @@ class DurableDavWorker extends AbstractEntrypointWorker {
     registerVolumeRoutes(app);
     registerVolumeBrowserRoutes(app);
     registerCredentialRoutes(app);
+    registerReplicationRoutes(app);
     registerUserProfileRoutes(app);
 
     // Volume-root content negotiation: browser document navigations

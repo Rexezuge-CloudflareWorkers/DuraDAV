@@ -3,25 +3,29 @@ import { DEFAULT_DEBUG_MODE, DEFAULT_SITE_URL } from './ConfigurationDefaults';
 
 import { AuthConfig } from './sections/AuthConfig';
 import { DavLimits } from './sections/DavLimits';
+import { ReplicationConfig } from './sections/ReplicationConfig';
 import { VolumeLimits } from './sections/VolumeLimits';
 
 /**
  * Injectable instance view over Durable-DAV environment configuration.
  *
  * Composed of focused section objects (`VolumeLimits`, `DavLimits`,
- * `AuthConfig`) so the facade stays thin. `ConfigurationManager` statics
- * delegate here for backward compatibility. New code should accept
- * `AppConfiguration` via constructor injection so env parsing is stubbable.
+ * `AuthConfig`, `ReplicationConfig`) so the facade stays thin.
+ * `ConfigurationManager` statics delegate here for backward compatibility. New
+ * code should accept `AppConfiguration` via constructor injection so env
+ * parsing is stubbable.
  */
 class AppConfiguration {
   private readonly volumes: VolumeLimits;
   private readonly dav: DavLimits;
   private readonly auth: AuthConfig;
+  private readonly replication: ReplicationConfig;
 
   constructor(private readonly env: unknown) {
     this.volumes = new VolumeLimits(env);
     this.dav = new DavLimits(env);
     this.auth = new AuthConfig(env);
+    this.replication = new ReplicationConfig(env);
   }
 
   public static fromEnv(env: unknown): AppConfiguration {
@@ -38,6 +42,50 @@ class AppConfiguration {
 
   public get authConfig(): AuthConfig {
     return this.auth;
+  }
+
+  public get replicationConfig(): ReplicationConfig {
+    return this.replication;
+  }
+
+  public getReplicationSweepLimit(): number {
+    return this.replication.getReplicationSweepLimit();
+  }
+
+  public getReplicationSlicePaths(): number {
+    return this.replication.getReplicationSlicePaths();
+  }
+
+  public getReplicationSliceBytes(): number {
+    return this.replication.getReplicationSliceBytes();
+  }
+
+  public getReplicationSliceMs(): number {
+    return this.replication.getReplicationSliceMs();
+  }
+
+  public getReplicationPassMaxMs(): number {
+    return this.replication.getReplicationPassMaxMs();
+  }
+
+  public getMaxReplicationFailures(): number {
+    return this.replication.getMaxReplicationFailures();
+  }
+
+  public getMaxReplicationsPerVolume(): number {
+    return this.replication.getMaxReplicationsPerVolume();
+  }
+
+  public getReplicationTimeoutMs(): number {
+    return this.replication.getReplicationTimeoutMs();
+  }
+
+  public getReplicationAllowedHosts(): string {
+    return this.replication.getReplicationAllowedHosts();
+  }
+
+  public isReplicationHashOnAmbiguous(): boolean {
+    return this.replication.isReplicationHashOnAmbiguous();
   }
 
   public getDebugMode(): boolean {
@@ -123,6 +171,14 @@ class AppConfiguration {
       'MAX_FILE_BYTES',
       'DAV_CACHE_TTL_SECONDS',
       'DO_DEVICE_BYTES',
+      'REPLICATION_SWEEP_LIMIT',
+      'REPLICATION_SLICE_PATHS',
+      'REPLICATION_SLICE_BYTES',
+      'REPLICATION_SLICE_MS',
+      'REPLICATION_PASS_MAX_MS',
+      'MAX_REPLICATION_FAILURES',
+      'MAX_REPLICATIONS_PER_VOLUME',
+      'REPLICATION_TIMEOUT_MS',
     ];
     for (const key of numericKeys) {
       if (!EnvParser.isValidPositiveInt(this.env, key)) {
@@ -135,6 +191,15 @@ class AppConfiguration {
     if (this.getEnvironment() === 'production' && (this.getDevAuthEmail() !== null || this.isDemoMode())) {
       warnings.push(
         'Security: DEV_AUTH_EMAIL or DEMO_MODE is set while ENVIRONMENT=production. These bypass authentication for every unauthenticated request and are ignored in production — remove them.',
+      );
+    }
+    // The egress allowlist is the one setting that widens an SSRF boundary, so
+    // a production deployment that has set it is told so at startup rather than
+    // discovering it from an audit. An unset value is the safe default and
+    // produces no warning.
+    if (this.getEnvironment() === 'production' && this.getReplicationAllowedHosts().trim() !== '') {
+      warnings.push(
+        'Security: REPLICATION_ALLOWED_HOSTS is set while ENVIRONMENT=production. It exempts the listed hosts from the egress policy that blocks loopback and private-network targets — confirm every entry is intended.',
       );
     }
     return warnings;

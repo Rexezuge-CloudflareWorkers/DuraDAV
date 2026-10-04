@@ -2,6 +2,7 @@
 import { DurableObject } from 'cloudflare:workers';
 import { createDofsFs, setDofsDeviceSize, ensureDavSchema } from '@durable-dav/dav-store';
 import type { DofsFs, DurableSqlStorage } from '@durable-dav/dav-store';
+import type { ReplicaStateRow } from '@durable-dav/dav-store';
 import { DAV_CLASS, SUPPORT_METHODS } from '@durable-dav/webdav';
 import { AppConfiguration } from '@durable-dav/backend-runtime/config';
 import { DavRepository } from './dav/DavRepository';
@@ -9,6 +10,8 @@ import { DavLockGuard } from './dav/DavLockGuard';
 import { fsPathOf, isValidInnerPath, resolveInnerPath, resolveDavBases } from './dav/DavContext';
 import { VolumeTransfer } from './dav/VolumeTransfer';
 import type { VolumeEntry } from './dav/VolumeTransfer';
+import { VolumeReplicationRpc } from './dav/VolumeReplicationRpc';
+import type { ReplicaApplyResult, ReplicaEntry, ReplicaOperation } from './dav/VolumeReplicationRpc';
 import { handleGet } from './dav/methods/ReadMethods';
 import { handleDelete, handleMkcol, handlePut } from './dav/methods/WriteMethods';
 import { handlePropfind, handleProppatch } from './dav/methods/PropMethods';
@@ -78,6 +81,10 @@ class DavVolumeWorker extends DurableObject<Env> {
 
   private transfer(): VolumeTransfer {
     return new VolumeTransfer(this.dofs, this.sql());
+  }
+
+  private replication(): VolumeReplicationRpc {
+    return new VolumeReplicationRpc(this.dofs, this.sql());
   }
 
   public override async fetch(request: Request): Promise<Response> {
@@ -222,6 +229,11 @@ class DavVolumeWorker extends DurableObject<Env> {
 
   /**
   Destroy all volume content. Idempotent.
+
+  `dav_replica_state` is cleared alongside the rest: leaving it would let a
+  volume later recreated at the same path inherit a base describing a tree that
+  no longer exists, and the first sync pass would then propagate deletions the
+  owner never made.
   */
   public async deleteVolume(): Promise<void> {
     try {
@@ -234,9 +246,60 @@ class DavVolumeWorker extends DurableObject<Env> {
       sql.exec(`DELETE FROM dav_nodes`);
       sql.exec(`DELETE FROM dav_props`);
       sql.exec(`DELETE FROM dav_locks`);
+      sql.exec(`DELETE FROM dav_replica_state`);
     } catch {
       // Filesystem delete already succeeded; metadata GC retries on next op.
     }
+  }
+
+  // --- Scheduled replication RPCs (see `VolumeReplicationRpc`) ---------------
+
+  /**
+   * Direct children of a collection, for the sync planner.
+   *
+   * Reachable only from the cron runner and the owner-scoped `POST .../run`
+   * route — never from a `DAV:` method, and deliberately with no `fetch` path:
+   * the DO is reachable through the front door, so a byte-stream entrypoint
+   * would have to carry authentication of its own to be safe.
+   */
+  public async listReplicaChildren(path: string): Promise<ReplicaEntry[]> {
+    this.ensureSize();
+    return this.replication().listChildren(path);
+  }
+
+  public async loadReplicaStateRows(replicationId: string): Promise<ReplicaStateRow[]> {
+    this.ensureSize();
+    return this.replication().loadState(replicationId);
+  }
+
+  public async applyReplicaOperations(replicationId: string, operations: ReplicaOperation[]): Promise<ReplicaApplyResult> {
+    this.ensureSize();
+    return this.replication().apply(replicationId, operations);
+  }
+
+  /**
+   * Drop the recorded base for one replication.
+   *
+   * Called when the replication is deleted. A re-created replication against the
+   * same target must not inherit the old base: it would report thousands of
+   * unchanged files and propagate every deletion the old one had recorded.
+   */
+  public async forgetReplication(replicationId: string): Promise<void> {
+    this.ensureSize();
+    this.replication().forget(replicationId);
+  }
+
+  /**
+  File bytes for a push, or for the opt-in ambiguity hash.
+  */
+  public async readReplicaStream(path: string): Promise<ReadableStream<Uint8Array> | null> {
+    this.ensureSize();
+    return this.replication().readStream(path);
+  }
+
+  public async readReplicaBytes(path: string): Promise<Uint8Array | null> {
+    this.ensureSize();
+    return this.replication().readBytes(path);
   }
 }
 

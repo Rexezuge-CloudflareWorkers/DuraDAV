@@ -8,3 +8,15 @@ export { VolumeCredentialService } from './VolumeCredentialService';
 export type { VolumeCredentialServiceDeps, VolumeCredentialServiceEnv } from './VolumeCredentialService';
 export { checkVolumeQuota, parseVolumePatch } from './VolumeCreatePolicy';
 export type { VolumePatch, VolumePatchInput } from './VolumeCreatePolicy';
+export { VolumeReplicationService } from './VolumeReplicationService';
+export {
+  normalizeRemotePath,
+  normalizeInterval,
+  oneOf,
+  REPLICATION_INTERVALS,
+  REPLICATION_MODES,
+  REPLICATION_AUTH_KINDS,
+  REPLICATION_TARGET_KINDS,
+} from './replicationInput';
+export type { ReplicationCreateInput, ReplicationPatchInput, ReplicationAuthKind, ReplicationTargetKind } from './replicationInput';
+export type { ReplicationMode } from './VolumeReplicationService';

@@ -1,6 +1,7 @@
 import { createLogger } from '@durable-dav/backend-runtime/logger';
 import type { ScheduledTask } from './IScheduledTask';
 import { ExpiredCredentialPruningTask } from './ExpiredCredentialPruningTask';
+import { ReplicationSyncTask } from './ReplicationSyncTask';
 
 const logger = createLogger('CronTasks');
 
@@ -12,6 +13,10 @@ interface TaskDefinition {
 
 const CRON_TASK_FACTORIES: readonly TaskDefinition[] = [
   { name: 'ExpiredCredentialPruningTask', phase: 1, make: () => new ExpiredCredentialPruningTask() },
+  // Phase 2: replication runs after the cheap hygiene pass, because a replication
+  // that deletes on both sides should not be the first thing a tick spends its
+  // budget on.
+  { name: 'ReplicationSyncTask', phase: 2, make: () => new ReplicationSyncTask() },
 ];
 
 function tasksForPhase(phase: 1 | 2): ScheduledTask[] {
@@ -28,4 +33,5 @@ async function runScheduledTasks(env: Env, cron: string, scheduledTime: number):
 
 export { CRON_TASK_FACTORIES, tasksForPhase, runScheduledTasks };
 export { ExpiredCredentialPruningTask } from './ExpiredCredentialPruningTask';
+export { ReplicationSyncTask } from './ReplicationSyncTask';
 export type { ScheduledTask } from './IScheduledTask';
