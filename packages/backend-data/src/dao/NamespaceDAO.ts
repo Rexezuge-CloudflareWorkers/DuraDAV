@@ -24,7 +24,10 @@ class NamespaceDAO extends BaseDAO {
   }
 
   public async get(usernameCi: string): Promise<NamespaceRow | null> {
-    return this.database.prepare('SELECT * FROM namespaces WHERE username_ci = ? LIMIT 1').bind(usernameCi).first<NamespaceRow>();
+    return this.firstWithRetry(
+      () => this.database.prepare('SELECT * FROM namespaces WHERE username_ci = ? LIMIT 1').bind(usernameCi).first<NamespaceRow>(),
+      'get namespace by username',
+    );
   }
 
   public async isTaken(usernameCi: string): Promise<boolean> {

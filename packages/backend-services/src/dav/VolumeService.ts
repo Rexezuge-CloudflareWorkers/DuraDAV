@@ -29,13 +29,20 @@ class VolumeService {
   private readonly deps: Required<Pick<VolumeServiceDeps, 'volumeDAO' | 'credentialDAO' | 'identity' | 'config'>>;
 
   constructor(
-    private readonly env: VolumeServiceEnv,
+    env: VolumeServiceEnv,
     deps: VolumeServiceDeps = {},
   ) {
+    // One `UserIdentityService` for this instance, not one per call. Its
+    // address→account memo is the point of the class — `serviceBindings` binds a
+    // single shared instance per request scope for exactly this reason, and this
+    // default defeated it by allocating a fresh instance on every resolution.
+    // Only reached when `deps.identity` is omitted (a direct construction in a
+    // test or a script); the composition root always supplies the shared one.
+    const identity = new UserIdentityService(env);
     this.deps = {
       volumeDAO: () => Promise.resolve(new DavVolumeDAO(env.DB)),
       credentialDAO: () => Promise.resolve(new DavCredentialDAO(env.DB)),
-      identity: () => Promise.resolve(new UserIdentityService(env)),
+      identity: () => Promise.resolve(identity),
       config: AppConfiguration.fromEnv(env),
       ...deps,
     };

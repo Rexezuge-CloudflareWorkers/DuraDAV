@@ -6,7 +6,9 @@ const DEFAULT_MAX_RETRIES = 3;
 const DEFAULT_BASE_DELAY_MS = 100;
 
 // Exported so `BaseDAO.firstWithRetry` can reuse the same backoff schedule as
-// `executeD1WithRetry` rather than hard-coding a second, divergent one.
+// `executeD1WithRetry` rather than hard-coding a second, divergent one — which is
+// why `backoffMs` below is exported too, since re-deriving `baseDelayMs * 2 ** n`
+// at the call site is the same divergence one level up.
 const D1_RETRY_DEFAULTS = { maxRetries: DEFAULT_MAX_RETRIES, baseDelayMs: DEFAULT_BASE_DELAY_MS } as const;
 
 function sleep(ms: number): Promise<void> {
@@ -41,18 +43,18 @@ function toDatabaseError(errorMessage: string, context: string): DatabaseError {
  * on the retry attempt, so it must be recognised and re-thrown rather than
  * re-wrapped into a second layer of `Failed to …`.
  */
-async function executeD1WithRetry(
-  operation: () => Promise<D1Result>,
+async function executeD1WithRetry<T = D1Result>(
+  operation: () => Promise<T & D1Result>,
   context: string,
   options?: { maxRetries?: number; baseDelayMs?: number },
-): Promise<D1Result> {
+): Promise<T & D1Result> {
   const maxRetries: number = options?.maxRetries ?? DEFAULT_MAX_RETRIES;
   const baseDelayMs: number = options?.baseDelayMs ?? DEFAULT_BASE_DELAY_MS;
 
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
     const isLastAttempt = attempt === maxRetries;
     try {
-      const result: D1Result = await operation();
+      const result: T & D1Result = await operation();
       if (result.success) return result;
       const errorMessage: string = result.error ?? 'Unknown database error';
       const failure = toDatabaseError(errorMessage, context);
@@ -89,4 +91,4 @@ async function executeD1WithRetry(
   throw new DatabaseError(`Failed to ${context} after ${maxRetries + 1} attempts`);
 }
 
-export { executeD1WithRetry, sleep, D1_RETRY_DEFAULTS };
+export { executeD1WithRetry, sleep, backoffMs, D1_RETRY_DEFAULTS };

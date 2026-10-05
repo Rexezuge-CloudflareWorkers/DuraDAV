@@ -160,21 +160,27 @@ class UserDAO extends BaseDAO {
     // Lowercase the *parameter*: every writer stores the anchor lowercased, so
     // `lower(email) = lower(?)` matched identically while making the primary
     // key unusable.
-    return this.database.prepare('SELECT * FROM users WHERE email = ? LIMIT 1').bind(email.toLowerCase()).first<UserRow>();
+    return this.firstWithRetry(
+      () => this.database.prepare('SELECT * FROM users WHERE email = ? LIMIT 1').bind(email.toLowerCase()).first<UserRow>(),
+      'get user by email anchor',
+    );
   }
 
   /**
   The account behind a stable key. Null on a pre-0004 database.
   */
   public async getById(id: string): Promise<UserRow | null> {
-    return this.database.prepare('SELECT * FROM users WHERE id = ? LIMIT 1').bind(id).first<UserRow>();
+    return this.firstWithRetry(() => this.database.prepare('SELECT * FROM users WHERE id = ? LIMIT 1').bind(id).first<UserRow>(), 'get user by id');
   }
 
   /**
   The account currently signing in with this address. 0004-only.
   */
   public async getByCurrentEmail(email: string): Promise<UserRow | null> {
-    return this.database.prepare('SELECT * FROM users WHERE current_email = ? LIMIT 1').bind(email.toLowerCase()).first<UserRow>();
+    return this.firstWithRetry(
+      () => this.database.prepare('SELECT * FROM users WHERE current_email = ? LIMIT 1').bind(email.toLowerCase()).first<UserRow>(),
+      'get user by current email',
+    );
   }
 
   /**
@@ -209,7 +215,10 @@ class UserDAO extends BaseDAO {
  * rule that makes the *semantics* correct, not the performance.)
  */
 public async getByUsernameCi(usernameCi: string): Promise<UserRow | null> {
-    return this.database.prepare('SELECT * FROM users WHERE username = ? LIMIT 1').bind(usernameCi.toLowerCase()).first<UserRow>();
+    return this.firstWithRetry(
+      () => this.database.prepare('SELECT * FROM users WHERE username = ? LIMIT 1').bind(usernameCi.toLowerCase()).first<UserRow>(),
+      'get user by username',
+    );
   }
 }
 

@@ -35,7 +35,7 @@ class UserService {
   private readonly deps: Required<UserServiceDeps>;
 
   constructor(
-    private readonly env: UserServiceEnv,
+    env: UserServiceEnv,
     deps: UserServiceDeps = {},
   ) {
     this.deps = {

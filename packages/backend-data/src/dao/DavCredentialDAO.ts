@@ -83,40 +83,75 @@ class DavCredentialDAO extends BaseDAO {
   }
 
   public async getById(credentialId: string): Promise<DavCredentialMetadata | undefined> {
-    const row = await this.database
-      .prepare(
-        `SELECT credential_id, volume_id, username, password_hash, name, password_prefix, password_last_four, created_at, expires_at, last_used_at, read_only
-         FROM dav_credentials WHERE credential_id = ? LIMIT 1`,
-      )
-      .bind(credentialId)
-      .first<DavCredentialInternal>();
+    // `firstWithRetry` per this package's rule that no read calls `.first()`
+    // bare: a raw `D1_ERROR` is not a `DatabaseError`, so every documented
+    // `DatabaseError` handler above this read — the 503s in `BaseRoute` — would
+    // be unreachable and a D1 blip would surface as an opaque 500. Three lines
+    // below `getActiveByUsername`, which documents the rule in full.
+    const row = await this.firstWithRetry(
+      () =>
+        this.database
+          .prepare(
+            `SELECT credential_id, volume_id, username, password_hash, name, password_prefix, password_last_four, created_at, expires_at, last_used_at, read_only
+             FROM dav_credentials WHERE credential_id = ? LIMIT 1`,
+          )
+          .bind(credentialId)
+          .first<DavCredentialInternal>(),
+      'get dav credential by id',
+    );
     return row ? this.toMetadata(row) : undefined;
   }
 
   public async listByVolume(volumeId: string): Promise<DavCredentialMetadata[]> {
-    const result = await this.database
-      .prepare(
-        `SELECT credential_id, volume_id, username, password_hash, name, password_prefix, password_last_four, created_at, expires_at, last_used_at, read_only
-         FROM dav_credentials WHERE volume_id = ? ORDER BY created_at DESC`,
-      )
-      .bind(volumeId)
-      .all<DavCredentialInternal>();
-    return (result.results ?? []).map((row) => this.toMetadata(row));
+    const rows = await this.allWithRetry<DavCredentialInternal>(
+      () =>
+        this.database
+          .prepare(
+            `SELECT credential_id, volume_id, username, password_hash, name, password_prefix, password_last_four, created_at, expires_at, last_used_at, read_only
+             FROM dav_credentials WHERE volume_id = ? ORDER BY created_at DESC`,
+          )
+          .bind(volumeId)
+          .all<DavCredentialInternal>(),
+      'list dav credentials by volume',
+    );
+    return rows.map((row) => this.toMetadata(row));
   }
 
+  /**
+   * How many credentials a bucket already has, for `MAX_CREDENTIALS_PER_VOLUME`.
+   *
+   * Retried because the caller uses the answer to *reject* a creation: a D1 blip
+   * that surfaced as a raw error became a 500 on an unrelated request, and one
+   * that degraded to `0` would let the cap be bypassed entirely.
+   */
   public async countByVolume(volumeId: string): Promise<number> {
-    const row = await this.database
-      .prepare('SELECT COUNT(*) AS count FROM dav_credentials WHERE volume_id = ?')
-      .bind(volumeId)
-      .first<{ count: number }>();
+    const row = await this.firstWithRetry(
+      () =>
+        this.database
+          .prepare('SELECT COUNT(*) AS count FROM dav_credentials WHERE volume_id = ?')
+          .bind(volumeId)
+          .first<{ count: number }>(),
+      'count dav credentials by volume',
+    );
     return row?.count ?? 0;
   }
 
+  /**
+   * Whether a username is already claimed anywhere in D1.
+   *
+   * A uniqueness probe, so it is read through `firstWithRetry` like every other
+   * read: the two callers (`ensureUsername`, credential creation) both treat a
+   * throw as "cannot proceed" rather than as "available".
+   */
   public async usernameExists(username: string): Promise<boolean> {
-    const row = await this.database
-      .prepare('SELECT 1 AS found FROM dav_credentials WHERE username = ? LIMIT 1')
-      .bind(username)
-      .first<{ found: number }>();
+    const row = await this.firstWithRetry(
+      () =>
+        this.database
+          .prepare('SELECT 1 AS found FROM dav_credentials WHERE username = ? LIMIT 1')
+          .bind(username)
+          .first<{ found: number }>(),
+      'check dav credential username exists',
+    );
     return Boolean(row?.found);
   }
 

@@ -100,9 +100,20 @@ class DavVolumeDAO extends BaseDAO {
     );
   }
 
+  /**
+   * By stable key. Used by the replication routes, which reach a volume from the
+   * `volume_id` on a `dav_replications` row rather than by owner and name.
+   *
+   * `firstWithRetry` per this package's rule that no read calls `.first()` bare —
+   * a raw `D1_ERROR` is not a `DatabaseError`, so the 503 that `BaseRoute` maps it
+   * to would be unreachable and a D1 blip would surface as an opaque 500 on the
+   * "Sync Now" button.
+   */
   public async getById(id: string): Promise<DavVolumeRow | null> {
-    const result = await this.database.prepare('SELECT * FROM dav_volumes WHERE id = ? LIMIT 1').bind(id).first<DavVolumeRow>();
-    return result ?? null;
+    return this.firstWithRetry(
+      () => this.database.prepare('SELECT * FROM dav_volumes WHERE id = ? LIMIT 1').bind(id).first<DavVolumeRow>(),
+      'get dav volume by id',
+    );
   }
 
   public async update(
@@ -142,18 +153,34 @@ class DavVolumeDAO extends BaseDAO {
    * findable by its old one.
    */
   public async listByOwnerUserId(ownerUserId: string, limit = 1000): Promise<DavVolumeRow[]> {
-    const result = await this.database
-      .prepare('SELECT * FROM dav_volumes WHERE owner_user_id = ? ORDER BY updated_at DESC LIMIT ?')
-      .bind(ownerUserId, limit)
-      .all<DavVolumeRow>();
-    return result.results ?? [];
+    return this.allWithRetry<DavVolumeRow>(
+      () =>
+        this.database
+          .prepare('SELECT * FROM dav_volumes WHERE owner_user_id = ? ORDER BY updated_at DESC LIMIT ?')
+          .bind(ownerUserId, limit)
+          .all<DavVolumeRow>(),
+      'list dav volumes by owner user id',
+    );
   }
 
+  /**
+   * How many volumes an account owns, for `MAX_VOLUMES_PER_USER`.
+   *
+   * The one count where degrading on failure would be a security-relevant
+   * decision rather than an inconvenience: `VolumeService.createVolume` reads this
+   * to decide whether to allow a creation, so a count that silently answered `0`
+   * would let the quota be bypassed. `firstWithRetry` turns a D1 blip into a
+   * `DatabaseError` the caller turns into a 503.
+   */
   public async countByOwnerUserId(ownerUserId: string): Promise<number> {
-    const row = await this.database
-      .prepare('SELECT COUNT(*) AS cnt FROM dav_volumes WHERE owner_user_id = ?')
-      .bind(ownerUserId)
-      .first<{ cnt: number }>();
+    const row = await this.firstWithRetry(
+      () =>
+        this.database
+          .prepare('SELECT COUNT(*) AS cnt FROM dav_volumes WHERE owner_user_id = ?')
+          .bind(ownerUserId)
+          .first<{ cnt: number }>(),
+      'count dav volumes by owner user id',
+    );
     return row?.cnt ?? 0;
   }
 
@@ -161,14 +188,17 @@ class DavVolumeDAO extends BaseDAO {
   @deprecated Pre-0004 fallback; prefer `listByOwnerUserId`.
   */
   public async listByOwnerEmail(ownerEmail: string, limit = 1000): Promise<DavVolumeRow[]> {
-    const result = await this.database
-      // `owner_email` is stored lowercased (`VolumeService.createVolume`), so
-      // the function call defeated `idx_dav_volumes_owner_email` on a hot path.
-      // Lowercase the parameter instead to keep the index usable.
-      .prepare('SELECT * FROM dav_volumes WHERE owner_email = ? ORDER BY updated_at DESC LIMIT ?')
-      .bind(ownerEmail.toLowerCase(), limit)
-      .all<DavVolumeRow>();
-    return result.results ?? [];
+    return this.allWithRetry<DavVolumeRow>(
+      () =>
+        this.database
+          // `owner_email` is stored lowercased (`VolumeService.createVolume`), so
+          // the function call defeated `idx_dav_volumes_owner_email` on a hot path.
+          // Lowercase the parameter instead to keep the index usable.
+          .prepare('SELECT * FROM dav_volumes WHERE owner_email = ? ORDER BY updated_at DESC LIMIT ?')
+          .bind(ownerEmail.toLowerCase(), limit)
+          .all<DavVolumeRow>(),
+      'list dav volumes by owner email',
+    );
   }
 
   public async renameOwner(oldOwnerCi: string, newOwner: string, now: number): Promise<void> {
@@ -186,10 +216,14 @@ class DavVolumeDAO extends BaseDAO {
   @deprecated Pre-0004 fallback; prefer `countByOwnerUserId`.
   */
   public async countByOwnerEmail(ownerEmail: string): Promise<number> {
-    const row = await this.database
-      .prepare('SELECT COUNT(*) AS cnt FROM dav_volumes WHERE owner_email = ?')
-      .bind(ownerEmail.toLowerCase())
-      .first<{ cnt: number }>();
+    const row = await this.firstWithRetry(
+      () =>
+        this.database
+          .prepare('SELECT COUNT(*) AS cnt FROM dav_volumes WHERE owner_email = ?')
+          .bind(ownerEmail.toLowerCase())
+          .first<{ cnt: number }>(),
+      'count dav volumes by owner email',
+    );
     return row?.cnt ?? 0;
   }
 

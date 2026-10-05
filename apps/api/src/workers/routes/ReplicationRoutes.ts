@@ -256,7 +256,13 @@ async function runReplicaSliceNow(scope: Container, env: Env, replicationId: str
   const row = await volumeDAO.getById(replication.volume_id);
   if (!row) throw new NotFoundError('Volume not found');
   const stub = getVolumeStub(env, row.owner, row.name) as unknown as LocalReplicaStub;
-  return new ReplicationRunner(env, replication, row.owner, row.name, stub, { replicationDAO }).runSlice();
+  // Both DAOs, from the scope. Passing only `replicationDAO` left the runner to
+  // fall back to `new DavReplicationConflictDAO(env.DB)`, so the conflict-audit
+  // rows on the "Sync Now" path were written by a DAO that never passed through
+  // the request scope — the exact inconsistency `serviceBindings` documents
+  // having been fixed elsewhere.
+  const conflictDAO = await scope.get(Tokens.DavReplicationConflictDAO)();
+  return new ReplicationRunner(env, replication, row.owner, row.name, stub, { replicationDAO, conflictDAO }).runSlice();
 }
 
 async function forgetReplicaState(c: ApiContext, owner: string, volume: string, replicationId: string): Promise<void> {

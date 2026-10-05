@@ -30,7 +30,7 @@ class VolumeCredentialService {
   private readonly deps: Required<VolumeCredentialServiceDeps>;
 
   constructor(
-    private readonly env: VolumeCredentialServiceEnv,
+    env: VolumeCredentialServiceEnv,
     deps: VolumeCredentialServiceDeps = {},
   ) {
     this.deps = {
