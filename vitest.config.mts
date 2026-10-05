@@ -23,6 +23,20 @@ export default defineConfig({
     // A custom `exclude` replaces Vitest's defaults, so `node_modules` must be
     // re-listed: `test/` is a workspace project and therefore has its own.
     exclude: ['**/node_modules/**', '**/dist/**', 'test/integration/**'],
+    server: {
+      deps: {
+        // `dofs` imports `cloudflare:workers`, and a `node_modules` dependency is
+        // externalized by default — so Node's own ESM loader resolves that specifier
+        // and rejects the scheme before the `resolve.alias` below is ever consulted.
+        // Inlining routes it back through Vite, where the alias applies.
+        //
+        // Needed by any unit test that reaches `dav-store`'s barrel, which
+        // re-exports `dofs`. Without it `DavRepository` — the module every DAV
+        // method handler is built on — cannot be imported outside the workerd
+        // integration suite at all.
+        inline: ['dofs'],
+      },
+    },
     coverage: {
       provider: 'v8',
       reporter: ['text', 'lcov', 'html'],

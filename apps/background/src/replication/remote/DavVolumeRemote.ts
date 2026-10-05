@@ -23,11 +23,39 @@ function trimSlashes(value: string): string {
  * usable in tests without a module mock.
  */
 interface ReplicaVolumeStub {
-  listReplicaChildren(path: string): Promise<RemoteEntry[]>;
+  /**
+   * Direct children of one collection, **with an explicit statement of whether
+   * the listing is complete**.
+   *
+   * Not a bare array. A listing is the only evidence the sync engine has that a
+   * path is gone, so "did this see everything?" is not an implementation detail
+   * of the stub — it is the input to the deletion gate. Carrying it in the
+   * return type means a future truncating implementation has to answer the
+   * question rather than have `complete: true` assumed for it here.
+   */
+  listReplicaChildren(path: string): Promise<ReplicaListing>;
   readReplicaStream(path: string): Promise<ReadableStream<Uint8Array> | null>;
   readReplicaBytes(path: string): Promise<Uint8Array | null>;
   applyReplicaOperations(replicationId: string, operations: unknown[]): Promise<{ applied: number; failed: number; error: string | null }>;
 }
+
+/**
+ * What the volume DO reports for one collection listing.
+ *
+ * Structurally identical to the `ReplicaListing` that `VolumeReplicationRpc`
+ * declares and returns. It is redeclared rather than imported because this
+ * module is reachable *from* the DO class that constructs it, so the import
+ * would be a cycle — the same reason `ReplicaVolumeStub` below is structural
+ * rather than `DavVolumeWorker`.
+ */
+type ReplicaListing = {
+  entries: RemoteEntry[];
+  /**
+   * `false` means the listing covered less than the collection, so its
+   * absences are not evidence that anything is gone.
+   */
+  complete: boolean;
+};
 
 type DavVolumeRemoteOptions = {
   /**
@@ -108,7 +136,16 @@ class DavVolumeRemote implements RemoteVolume {
     return this.root === '' ? remotePath : remotePath === '' ? this.root : `${this.root}/${remotePath}`;
   }
 
-  private async listChildren(innerPath: string): Promise<RemoteEntry[]> {
+  /**
+   * A listing that failed outright becomes `RemoteUnavailableError`, which the
+   * collector counts as an error and which closes the deletion gate.
+   *
+   * The DO half pairs this with `DavRepository.requireChildren` rather than the
+   * degrading `listChildren`: a stub that answered `[]` for an unreadable
+   * collection would never reach this catch, and an empty listing is exactly
+   * what a mass deletion looks like to the planner.
+   */
+  private async listChildren(innerPath: string): Promise<ReplicaListing> {
     try {
       return await this.stub.listReplicaChildren(innerPath);
     } catch (error) {
@@ -118,7 +155,8 @@ class DavVolumeRemote implements RemoteVolume {
 
   public async list(path: string): Promise<RemoteListing> {
     const inner = this.withRoot(path);
-    const children = await this.listChildren(inner);
+    const listing = await this.listChildren(inner);
+    const children = listing.entries;
     // `listReplicaChildren` answers in the *volume's* coordinates whatever
     // collection it was asked about, and it includes that collection's own entry.
     // Two corrections are needed to land in the caller's namespace:
@@ -136,9 +174,13 @@ class DavVolumeRemote implements RemoteVolume {
       entries: children
         .filter((entry) => entry.path !== inner)
         .map((entry) => ({ ...entry, path: `${callerPrefix}${entry.path.slice(volumePrefix.length)}` })),
-      // A single indexed read of one collection. There is no truncation mode to
-      // report: either the read succeeded or this threw.
-      complete: true,
+      // Propagated rather than asserted. This used to be a hardcoded `true` on
+      // the reasoning that "a single indexed read either succeeded or threw" —
+      // which was true of the read and false of the answer, because the read's
+      // failure was being absorbed one layer down in the DO. Reporting the
+      // volume's own answer means a partial listing cannot be laundered into a
+      // trustworthy one on the way through here.
+      complete: listing.complete,
     };
   }
 
@@ -148,7 +190,13 @@ class DavVolumeRemote implements RemoteVolume {
     const slash = inner.lastIndexOf('/');
     const parent = slash === -1 ? '' : inner.slice(0, slash);
     const siblings = await this.listChildren(parent);
-    const found = siblings.find((entry) => entry.path === inner);
+    const found = siblings.entries.find((entry) => entry.path === inner);
+    // A partial listing that did not reach this path is an unknown, not an
+    // absence. Reporting `null` here would let a caller treat "could not see it"
+    // as "it is gone", which is the same conflation the gate exists to stop.
+    if (found === undefined && !siblings.complete) {
+      throw new RemoteUnavailableError(`listing ${parent} on the sibling volume was incomplete`);
+    }
     return found === undefined ? null : { ...found, path };
   }
 

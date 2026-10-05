@@ -22,6 +22,20 @@ type Recorded = { op: string; path?: string; state?: Partial<ReplicaStateRow> };
 type Call = { op: string; arg?: string };
 
 /**
+ * Wrap listing entries in the volume DO's completeness envelope.
+ *
+ * The default `complete: true` mirrors a real DO read that succeeded. Tests that
+ * exercise the gate pass `complete: false` explicitly, so every listing in this
+ * file states whether it is trustworthy rather than relying on a bare array.
+ */
+function listing(
+  entries: RemoteEntry[],
+  complete = true,
+): { entries: RemoteEntry[]; complete: boolean } {
+  return { entries, complete };
+}
+
+/**
  * In-memory stand-in for a volume Durable Object.
  *
  * Doubles as the *sibling bucket* target in the `dav-volume` tests, which is what
@@ -39,7 +53,7 @@ function localStub(overrides: Partial<LocalReplicaStub> = {}): LocalReplicaStub 
     calls,
     listReplicaChildren: async (path) => {
       calls.push({ op: 'list', arg: path });
-      return [];
+      return listing([]);
     },
     readReplicaStream: async (path) => {
       calls.push({ op: 'get', arg: path });
@@ -75,15 +89,15 @@ function siblingStub(files: Record<string, string>, overrides: Partial<LocalRepl
   const inner = localStub();
   const listChildren =
     overrides.listReplicaChildren ??
-    (async (path: string) => {
-      const prefix = path === '' ? '' : `${path}/`;
-      return Object.keys(files)
-        .filter((name) => name !== path && (path === '' || name.startsWith(prefix)))
-        .map((name) => {
-          const entry = { path: name, isCollection: false, etag: `"${name}-v1"`, mtime: 1000, size: files[name]?.length ?? 1, contentType: 'text/plain' };
-          return path === '' ? entry : { ...entry, path: name.slice(prefix.length) };
-        });
-    });
+    (async (path: string) =>
+      listing(
+        Object.keys(files)
+          .filter((name) => name !== path && (path === '' || name.startsWith(`${path}/`)))
+          .map((name) => {
+            const entry = { path: name, isCollection: false, etag: `"${name}-v1"`, mtime: 1000, size: files[name]?.length ?? 1, contentType: 'text/plain' };
+            return path === '' ? entry : { ...entry, path: name.slice(path.length + 1) };
+          }),
+      ));
   return {
     ...inner,
     ...overrides,
@@ -244,7 +258,7 @@ describe('ReplicationRunner — the deletion gate', () => {
   }
 
   it('deletes from the remote when the local side removed the file', async () => {
-    const stub = localStub({ listReplicaChildren: async () => [], loadReplicaStateRows: async () => [baseRow('gone.txt')] });
+    const stub = localStub({ listReplicaChildren: async () => listing([]), loadReplicaStateRows: async () => [baseRow('gone.txt')] });
     const { runner, dao, target } = build({ stub, remoteFiles: { 'gone.txt': 'x' } });
     const result = await runner.runSlice();
     expect(target.calls.some((call) => call.op === 'unlink' && call.arg === 'gone.txt')).toBe(true);
@@ -256,7 +270,7 @@ describe('ReplicationRunner — the deletion gate', () => {
     // The single most important assertion in this file: an absence observed
     // through a listing that did not complete is not evidence of anything. The
     // sibling's RPC throws rather than returning `[]` for exactly this reason.
-    const stub = localStub({ listReplicaChildren: async () => [], loadReplicaStateRows: async () => [baseRow('gone.txt')] });
+    const stub = localStub({ listReplicaChildren: async () => listing([]), loadReplicaStateRows: async () => [baseRow('gone.txt')] });
     const target = siblingStub({}, {
       listReplicaChildren: async () => {
         throw new Error('sibling dofs unavailable');
@@ -285,8 +299,33 @@ describe('ReplicationRunner — the deletion gate', () => {
     expect(result.deferredPaths).toBe(1);
   });
 
+  it('executes zero deletions when the remote reports an incomplete listing', async () => {
+    // The case a thrown RPC does not cover. A sibling that *succeeds* and reports
+    // `complete: false` has told us its absences are meaningless — the adapter
+    // used to answer `complete: true` on its own behalf, which turned this into
+    // a silent mass deletion while the pass reported itself clean.
+    const stub = localStub({ listReplicaChildren: async () => listing([]), loadReplicaStateRows: async () => [baseRow('gone.txt')] });
+    const target = siblingStub({}, { listReplicaChildren: async () => listing([], false) });
+    const { runner } = build({ stub, remote: target });
+    const result = await runner.runSlice();
+    expect(target.calls.some((call) => call.op === 'unlink')).toBe(false);
+    expect(result.deferredPaths).toBe(1);
+    expect(result.status).not.toBe('ok');
+  });
+
+  it('executes zero deletions when the local side reports an incomplete listing', async () => {
+    // Symmetric to the remote case. A partial local listing omits paths, and each
+    // omission would read as "not here" and queue a pull that overwrites a good
+    // local copy with a stale remote one.
+    const stub = localStub({ listReplicaChildren: async () => listing([], false), loadReplicaStateRows: async () => [baseRow('keep.txt')] });
+    const { runner, target } = build({ stub, remoteFiles: { 'keep.txt': 'remote' } });
+    const result = await runner.runSlice();
+    expect(target.calls.some((call) => call.op === 'write')).toBe(false);
+    expect(result.deferredPaths).toBe(1);
+  });
+
   it('records every propagated deletion for the audit trail', async () => {
-    const stub = localStub({ listReplicaChildren: async () => [], loadReplicaStateRows: async () => [baseRow('gone.txt')] });
+    const stub = localStub({ listReplicaChildren: async () => listing([]), loadReplicaStateRows: async () => [baseRow('gone.txt')] });
     const { runner, conflicts } = build({ stub, remoteFiles: { 'gone.txt': 'x' } });
     await runner.runSlice();
     // Deletions are the irreversible ones, so "which side won, and what was kept"
@@ -300,7 +339,7 @@ describe('ReplicationRunner — the recorded base', () => {
   it('records nothing for a path that still exists on only one side', async () => {
     // A half-applied transfer must not be remembered as agreement, or the next
     // pass sees "unchanged" and never finishes the job.
-    const stub = localStub({ listReplicaChildren: async () => [] });
+    const stub = localStub({ listReplicaChildren: async () => listing([]) });
     const { runner } = build({ stub });
     await runner.runSlice();
     const records = stub.applied.filter((operation) => operation.op === 'record');
@@ -309,7 +348,7 @@ describe('ReplicationRunner — the recorded base', () => {
 
   it('forgets a path that reached neither side', async () => {
     const stub = localStub({
-      listReplicaChildren: async () => [],
+      listReplicaChildren: async () => listing([]),
       loadReplicaStateRows: async () => [
         {
           replicationId: 'rep_1',
@@ -358,7 +397,7 @@ describe('ReplicationRunner — transfers', () => {
   it('pushes a new local file to the remote', async () => {
     const localFile: RemoteEntry = { path: 'a.txt', isCollection: false, etag: '"a-v1"', mtime: 1000, size: 3, contentType: 'text/plain' };
     const stub = localStub({
-      listReplicaChildren: async (path: string) => (path === '' ? [localFile] : []),
+      listReplicaChildren: async (path: string) => listing(path === '' ? [localFile] : []),
       readReplicaStream: async () => new Response('abc').body,
     });
     const { runner, target } = build({ stub });
@@ -393,7 +432,7 @@ describe('ReplicationRunner — transfers', () => {
   it('writes a conflict copy rather than overwriting, in keep-both', async () => {
     const localFile: RemoteEntry = { path: 'a.txt', isCollection: false, etag: '"local-v2"', mtime: 2000, size: 3, contentType: 'text/plain' };
     const stub = localStub({
-      listReplicaChildren: async (path: string) => (path === '' ? [localFile] : []),
+      listReplicaChildren: async (path: string) => listing(path === '' ? [localFile] : []),
       readReplicaStream: async () => new Response('abc').body,
       loadReplicaStateRows: async () => [
         {
@@ -479,11 +518,11 @@ describe('ReplicationRunner — the ambiguity hash', () => {
     const stubLocal = localStub({
       // One entry at any depth: the file sits at the root, so the walk never descends
       // and the listing answer is the same whatever it asks for.
-      listReplicaChildren: async () => [localFile],
+      listReplicaChildren: async () => listing([localFile]),
       readReplicaBytes: async () => localBytes(body),
     });
     const target = siblingStub({}, {
-      listReplicaChildren: async () => [{ path: 'a.txt', isCollection: false, etag: '"r"', mtime: 1000, size: body.length, contentType: 'text/plain' }],
+      listReplicaChildren: async () => listing([{ path: 'a.txt', isCollection: false, etag: '"r"', mtime: 1000, size: body.length, contentType: 'text/plain' }]),
       readReplicaStream: async () => new Response(body).body,
     });
     const { runner, stub: applied } = build({ stub: stubLocal, remote: target, env: { REPLICATION_HASH_ON_AMBIGUOUS: 'true' } });
@@ -500,7 +539,7 @@ describe('ReplicationRunner — the ambiguity hash', () => {
         // A newer local mtime so `sync` has a decidable winner. Without one the two
         // sides tie and the planner resolves to keep-both before it ever hashes —
         // which is correct, and would leave the hash path untested.
-        listReplicaChildren: async () => [{ path: 'a.txt', isCollection: false, etag: '"l2"', mtime: 2000, size: 4, contentType: 'text/plain' }],
+        listReplicaChildren: async () => listing([{ path: 'a.txt', isCollection: false, etag: '"l2"', mtime: 2000, size: 4, contentType: 'text/plain' }]),
         loadReplicaStateRows: async () => [
           {
             replicationId: 'rep_1',
@@ -582,7 +621,7 @@ describe('ReplicationRunner — configuration and credentials', () => {
   it('records a conflict even when the audit write fails', async () => {
     const { runner } = build({
       stub: localStub({
-        listReplicaChildren: async () => [{ path: 'a.txt', isCollection: false, etag: '"l2"', mtime: 2000, size: 3, contentType: 'text/plain' }],
+        listReplicaChildren: async () => listing([{ path: 'a.txt', isCollection: false, etag: '"l2"', mtime: 2000, size: 3, contentType: 'text/plain' }]),
         readReplicaStream: async () => new Response('abc').body,
       }),
       remote: siblingStub({ 'a.txt': 'remote version' }),

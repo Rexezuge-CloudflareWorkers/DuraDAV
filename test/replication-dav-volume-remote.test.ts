@@ -17,13 +17,41 @@ import { RemoteUnavailableError } from '@durable-dav/backend-services/replicatio
 
 type Call = { op: string; arg?: string };
 
+/**
+Shape of one listed entry, with the fields the planner reads.
+*/
+type StubEntry = {
+  path: string;
+  isCollection: boolean;
+  etag: string | null;
+  mtime: number | null;
+  size: number | null;
+  contentType: string | null;
+};
+
+/**
+ * Wrap listing entries in the production completeness envelope.
+ *
+ * Defaults to `complete: true`, which is what the DO reports when its read
+ * succeeded. Tests that care about the failure mode pass `complete: false`
+ * explicitly, so "this listing is trustworthy" is visible at every call site
+ * rather than implied by the return type.
+ *
+ * Typed against `StubEntry` rather than a literal shape so `{ ...ENTRY, path }`
+ * spreads keep their widened types — `as const` on the fixture would make every
+ * caller's own object a type error.
+ */
+function listing(entries: StubEntry[], complete = true): { entries: StubEntry[]; complete: boolean } {
+  return { entries, complete };
+}
+
 function stub(overrides: Partial<ReplicaStub> = {}): ReplicaStub & { calls: Call[] } {
   const calls: Call[] = [];
   return {
     calls,
     listReplicaChildren: async (path: string) => {
       calls.push({ op: 'list', arg: path });
-      return [];
+      return listing([]);
     },
     readReplicaStream: async (path: string) => {
       calls.push({ op: 'get', arg: path });
@@ -39,7 +67,15 @@ function stub(overrides: Partial<ReplicaStub> = {}): ReplicaStub & { calls: Call
 }
 
 interface ReplicaStub {
-  listReplicaChildren: (path: string) => Promise<Array<{ path: string; isCollection: boolean; etag: string | null; mtime: number | null; size: number | null; contentType: string | null }>>;
+  /**
+   * Returns a completeness flag alongside the entries, matching the production
+   * contract. `listing()` is the helper every stub below uses so a partial
+   * listing is expressible without each case spelling the wrapper by hand.
+   */
+  listReplicaChildren: (path: string) => Promise<{
+    entries: Array<{ path: string; isCollection: boolean; etag: string | null; mtime: number | null; size: number | null; contentType: string | null }>;
+    complete: boolean;
+  }>;
   readReplicaStream: (path: string) => Promise<ReadableStream<Uint8Array> | null>;
   readReplicaBytes: (path: string) => Promise<Uint8Array | null>;
   applyReplicaOperations: (id: string, operations: unknown[]) => Promise<{ applied: number; failed: number; error: string | null }>;
@@ -88,43 +124,58 @@ describe('DavVolumeRemote — root mapping', () => {
     // asked about, and includes that collection. Without both corrections the target's
     // subdirectory becomes a local directory and every entry matches no local path.
     const target = stub({
-      listReplicaChildren: async () => [
-        { ...ENTRY, path: 'sub', isCollection: true },
-        { ...ENTRY, path: 'sub/a.txt' },
-      ],
+      listReplicaChildren: async () =>
+        listing([
+          { ...ENTRY, path: 'sub', isCollection: true },
+          { ...ENTRY, path: 'sub/a.txt' },
+        ]),
     });
     const { remote } = adapter(target, { remotePath: 'sub' });
-    const listing = await remote.list('');
-    expect(listing.entries.map((entry) => entry.path)).toEqual(['a.txt']);
+    const listed = await remote.list('');
+    expect(listed.entries.map((entry) => entry.path)).toEqual(['a.txt']);
   });
 
   it('keeps a nested listing under the caller path', async () => {
     const target = stub({
-      listReplicaChildren: async () => [
-        { ...ENTRY, path: 'sub/nested', isCollection: true },
-        { ...ENTRY, path: 'sub/nested/b.txt' },
-      ],
+      listReplicaChildren: async () =>
+        listing([
+          { ...ENTRY, path: 'sub/nested', isCollection: true },
+          { ...ENTRY, path: 'sub/nested/b.txt' },
+        ]),
     });
     const { remote } = adapter(target, { remotePath: 'sub' });
-    const listing = await remote.list('nested');
-    expect(listing.entries.map((entry) => entry.path)).toEqual(['nested/b.txt']);
+    const listed = await remote.list('nested');
+    expect(listed.entries.map((entry) => entry.path)).toEqual(['nested/b.txt']);
   });
 
   it('is the identity when no subdirectory is configured', async () => {
     const target = stub({
-      listReplicaChildren: async () => [
-        { ...ENTRY, path: '', isCollection: true },
-        { ...ENTRY, path: 'a.txt' },
-      ],
+      listReplicaChildren: async () =>
+        listing([
+          { ...ENTRY, path: '', isCollection: true },
+          { ...ENTRY, path: 'a.txt' },
+        ]),
     });
     const { remote } = adapter(target);
-    const listing = await remote.list('');
-    expect(listing.entries.map((entry) => entry.path)).toEqual(['a.txt']);
+    const listed = await remote.list('');
+    expect(listed.entries.map((entry) => entry.path)).toEqual(['a.txt']);
   });
 
-  it('reports a complete listing, because the sibling read is a single indexed query', async () => {
+  it('reports a complete listing when the sibling says it read everything', async () => {
     const { remote } = adapter(stub());
     expect((await remote.list('')).complete).toBe(true);
+  });
+
+  it('propagates an incomplete listing instead of asserting its own completeness', async () => {
+    // The regression: this adapter used to hardcode `complete: true` on the
+    // reasoning that its own read "either succeeded or threw". The read did
+    // throw — inside the DO, one layer down, where a degraded `listDir` had
+    // already turned the failure into an empty array. The adapter's answer was
+    // therefore a guess about a failure it never saw, and an empty listing plus
+    // `complete: true` is precisely a mass deletion to the planner.
+    const target = stub({ listReplicaChildren: async () => listing([], false) });
+    const { remote } = adapter(target);
+    expect((await remote.list('')).complete).toBe(false);
   });
 
   it('refuses to resolve a path containing ".."', async () => {
@@ -158,13 +209,22 @@ describe('DavVolumeRemote — reads and writes', () => {
 
   it('stats by asking the parent collection', async () => {
     const target = stub({
-      listReplicaChildren: async (path: string) => (path === 'sub' ? [{ ...ENTRY, path: 'sub/a.txt' }] : []),
+      listReplicaChildren: async (path: string) => (listing(path === 'sub' ? [{ ...ENTRY, path: 'sub/a.txt' }] : [])),
     });
     const { remote } = adapter(target, { remotePath: 'sub' });
     expect((await remote.stat('a.txt'))?.path).toBe('a.txt');
     expect(await remote.stat('missing.txt')).toBeNull();
     // The root is not a resource the sync engine ever looks up.
     expect(await remote.stat('')).toBeNull();
+  });
+
+  it('treats "not in a partial listing" as unknown rather than absent', async () => {
+    // `stat` is how the planner decides a remote path still exists. A listing that
+    // provably did not reach the path leaves it genuinely unknown, and reporting
+    // `null` here would let "could not see it" be read as "it is gone".
+    const target = stub({ listReplicaChildren: async () => listing([], false) });
+    const { remote } = adapter(target, { remotePath: 'sub' });
+    await expect(remote.stat('a.txt')).rejects.toThrow(RemoteUnavailableError);
   });
 
   it('writes through the configured subdirectory', async () => {

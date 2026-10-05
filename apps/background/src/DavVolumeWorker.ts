@@ -11,7 +11,7 @@ import { fsPathOf, isValidInnerPath, resolveInnerPath, resolveDavBases } from '.
 import { VolumeTransfer } from './dav/VolumeTransfer';
 import type { VolumeEntry } from './dav/VolumeTransfer';
 import { VolumeReplicationRpc } from './dav/VolumeReplicationRpc';
-import type { ReplicaApplyResult, ReplicaEntry, ReplicaOperation } from './dav/VolumeReplicationRpc';
+import type { ReplicaApplyResult, ReplicaListing, ReplicaOperation } from './dav/VolumeReplicationRpc';
 import { handleGet } from './dav/methods/ReadMethods';
 import { handleDelete, handleMkcol, handlePut } from './dav/methods/WriteMethods';
 import { handlePropfind, handleProppatch } from './dav/methods/PropMethods';
@@ -37,6 +37,7 @@ class DavVolumeWorker extends DurableObject<Env> {
   private readonly dofs: DofsFs;
   private readonly config: AppConfiguration;
   private sizeEnsured = false;
+  private schemaEnsured = false;
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
@@ -44,8 +45,11 @@ class DavVolumeWorker extends DurableObject<Env> {
     this.config = AppConfiguration.fromEnv(env);
     try {
       ensureDavSchema(ctx.storage.sql);
+      this.schemaEnsured = true;
     } catch {
-      // Schema bootstrap races on warm isolates; per-operation ensure below.
+      // Schema bootstrap races on warm isolates; the per-operation `sql()`
+      // ensure below retries. Not memoized on this path, so nothing is cached
+      // as done unless it actually completed.
     }
   }
 
@@ -71,10 +75,20 @@ class DavVolumeWorker extends DurableObject<Env> {
 
   private sql(): DurableSqlStorage {
     const sql = this.ctx.storage.sql as unknown as DurableSqlStorage;
+    // Memoized for the same reason `ensureSize` is, and it matters more: the
+    // schema step is 7 DDL statements *plus* an `ALTER` that throws and is
+    // caught on every single call, so an unmemoized `sql()` charged every
+    // WebDAV request seven DDL round trips and one raised SQLite error. The
+    // memo is cleared on failure so a broken schema is retried rather than
+    // cached as done.
+    if (this.schemaEnsured) return sql;
     try {
       ensureDavSchema(sql);
+      this.schemaEnsured = true;
     } catch {
-      // Per-op ensure is best-effort; statements surface real errors.
+      // Best-effort. A genuinely broken schema surfaces on the first real
+      // statement, which is where a useful error message comes from — and the
+      // memo above means this path is reached at most once per isolate.
     }
     return sql;
   }
@@ -262,7 +276,7 @@ class DavVolumeWorker extends DurableObject<Env> {
    * the DO is reachable through the front door, so a byte-stream entrypoint
    * would have to carry authentication of its own to be safe.
    */
-  public async listReplicaChildren(path: string): Promise<ReplicaEntry[]> {
+  public async listReplicaChildren(path: string): Promise<ReplicaListing> {
     this.ensureSize();
     return this.replication().listChildren(path);
   }

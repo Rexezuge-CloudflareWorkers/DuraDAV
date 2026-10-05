@@ -16,6 +16,14 @@ import { DavRepository } from './DavRepository';
  * path rather than normalizing it. A path that had to be rewritten to be safe is a path
  * someone constructed to leave the volume, and the caller — a plan built from two
  * listings — is exactly where that would come from.
+ *
+ * ## Reads here fail closed
+ *
+ * Every read in this module feeds a planner that treats an absence as a
+ * deletion, so none of them degrade a failed read into a benign-looking value.
+ * `describe` uses `DavRepository.requireStatInner` for that reason:
+ * `statInner` reports an unreadable path as `exists: false`, which drops the
+ * entry from the listing and reads as "deleted on this side".
  */
 
 /**
@@ -38,7 +46,12 @@ type ReplicaEntry = {
  * the fallback for a node whose metadata row is missing.
  */
 function describe(repo: DavRepository, path: string): ReplicaEntry | null {
-  const stat = repo.statInner(path);
+  // `requireStatInner`, not `statInner`: this answer decides whether a resource
+  // is still present, and `statInner` reports a failed read as
+  // `exists: false`. One dofs error would then drop an entry from a listing,
+  // which the planner reads as a deletion on that path — the same trap
+  // `VolumeReplicationRpc.listChildren` walks into if it degrades its listing.
+  const stat = repo.requireStatInner(path);
   if (!stat.exists) return null;
   const meta = repo.readMeta(path);
   return {

@@ -61,6 +61,25 @@ type ReplicaApplyResult = {
 const MAX_REPORTED_ERROR_LENGTH = 300;
 
 /**
+ * One collection listing, carrying whether it is complete.
+ *
+ * The flag is part of the answer rather than a property of the transport
+ * because a listing is the sync engine's only evidence that a path is gone: if
+ * a listing silently covered less than it claims, every missing path would
+ * queue as a deletion. `DavVolumeRemote` mirrors this into `RemoteListing`, and
+ * `collectSlice` closes the deletion gate on `complete: false`.
+ *
+ * A structurally-identical type is declared on the adapter side, in
+ * `DavVolumeRemote`, which needs it to describe the stub it calls without
+ * importing this module — `DavVolumeWorker` constructs the adapter, so an
+ * import the other way is a cycle.
+ */
+type ReplicaListing = {
+  entries: ReplicaEntry[];
+  complete: boolean;
+};
+
+/**
  * The Durable Object half of scheduled replication.
  *
  * Split out of `DavVolumeWorker` for the same reason `VolumeTransfer` was: this
@@ -92,32 +111,39 @@ class VolumeReplicationRpc {
    * `DavHttpRemote` does it that way: a resumed sweep needs a position to
    * resume from, and `listVolumeEntries`' single unbounded array has none.
    */
-  public listChildren(path: string): ReplicaEntry[] {
+  public listChildren(path: string): ReplicaListing {
     this.ensure();
     const parent = path === '' ? '' : path;
-    if (!isValidInnerPath(parent)) return [];
+    if (!isValidInnerPath(parent)) return { entries: [], complete: false };
     const repo = new DavRepository(this.dofs, this.sql);
     const entries: ReplicaEntry[] = [];
     if (parent !== '') {
       const self = ops.describe(repo, parent);
       if (self !== null) entries.push(self);
     }
-    // Throws on a listing failure rather than degrading to `[]`.
+    // `requireChildren`, not `listChildren`, and this is the whole reason the
+    // method exists. Both degrade a dofs error to "this collection is empty",
+    // which the sync planner reads as "every resource here was deleted" and
+    // queues as such — the mass deletion the engine's deletion gate exists to
+    // prevent. The throwing form makes a storage blip a thrown error instead,
+    // which `DavVolumeRemote` turns into `RemoteUnavailableError`, which
+    // `collectSlice` counts, which closes the gate for the pass.
     //
-    // `DavRepository.listChildren` swallows, which is right for rendering a
-    // listing and wrong for "what changed" — and this is the latter. Returning
-    // `[]` on a dofs error would tell the runner the collection is empty, which
-    // reads as "every file in it was deleted" and queues exactly the mass
-    // deletion the sync engine's gate exists to prevent. The runner catches this,
-    // counts the error, and closes the gate for the pass.
-    const names = repo.listChildren(parent);
+    // It said so in a comment here for a while while calling `listChildren`
+    // directly underneath, which is the failure mode this file is now shaped
+    // to make impossible: `describe` is also a deciding read, so it pairs with
+    // `requireStatInner` rather than `statInner` for the same reason.
+    const names = repo.requireChildren(parent);
     for (const name of names) {
       const child = repo.childInner(parent, name);
       if (!isValidInnerPath(child)) continue;
       const described = ops.describe(repo, child);
       if (described !== null) entries.push(described);
     }
-    return entries;
+    // Reached only if every read above did, because each of them throws on
+    // failure rather than degrading. That is what lets this be `true` instead of
+    // a guess — an incomplete listing cannot reach this return at all.
+    return { entries, complete: true };
   }
 
   public loadState(replicationId: string): ReplicaStateRow[] {
@@ -137,8 +163,7 @@ class VolumeReplicationRpc {
    * inside it — and so a new operation is added by adding a case, not by growing
    * a nested block.
    */
-  private async applyOne(replicationId: string, operation: ReplicaOperation, records: ReplicaStateWrite[], forgetPaths: string[]): Promise<void> {
-    const repo = new DavRepository(this.dofs, this.sql);
+  private async applyOne(repo: DavRepository, replicationId: string, operation: ReplicaOperation, records: ReplicaStateWrite[], forgetPaths: string[]): Promise<void> {
     switch (operation.op) {
       case 'mkdir': {
         ops.mkdir(this.dofs, repo, operation.path);
@@ -192,9 +217,13 @@ class VolumeReplicationRpc {
     let failed = 0;
     let error: string | null = null;
 
+    // One repository for the batch, not one per operation. It is a two-field
+    // value object over `dofs`/`sql`, so this is a readability change as much as
+    // an allocation one — but a 200-operation slice was constructing 200 of them.
+    const repo = new DavRepository(this.dofs, this.sql);
     for (const operation of operations) {
       try {
-        await this.applyOne(replicationId, operation, records, forgetPaths);
+        await this.applyOne(repo, replicationId, operation, records, forgetPaths);
         applied += 1;
       } catch (caught) {
         failed += 1;
@@ -249,5 +278,5 @@ class VolumeReplicationRpc {
 }
 
 export { VolumeReplicationRpc };
-export type {  ReplicaOperation, ReplicaApplyResult };
-export {type ReplicaEntry} from './replicaOperations';
+export type { ReplicaOperation, ReplicaApplyResult, ReplicaListing };
+export type { ReplicaEntry } from './replicaOperations';
