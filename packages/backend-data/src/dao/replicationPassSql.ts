@@ -42,20 +42,6 @@ function beginPassStatement(database: D1Queryable, replicationId: string, now: n
 }
 
 /**
- * Park the sweep position between ticks.
- *
- * `cursorRemaining` is a count of paths still to visit, not a byte estimate: it is the
- * only number available before the slice has read anything, and the staleness guard
- * compares it against zero to decide whether the pass ended cleanly.
- */
-function advanceCursorStatement(database: D1Queryable, replicationId: string, cursorPath: string | null, remaining: number, now: number) {
-  return database
-    .prepare('UPDATE dav_replications SET cursor_path = ?, cursor_remaining = ?, updated_at = ? WHERE replication_id = ?')
-    .bind(cursorPath, remaining, now, replicationId)
-    .run();
-}
-
-/**
  * Record the outcome of one tick, and open or close the gate accordingly.
  *
  * The auto-disable is one statement on purpose: a read-then-write would race two
@@ -96,4 +82,4 @@ function recordRunStatement(
     .run();
 }
 
-export { advanceCursorStatement, beginPassStatement, recordRunStatement };
+export { beginPassStatement, recordRunStatement };

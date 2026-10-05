@@ -5,12 +5,6 @@ class EnvParser {
     return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : Number(defaultValue);
   }
 
-  public static nonNegativeInt(env: unknown, key: string, defaultValue: string): number {
-    const value = this.readString(env, key);
-    const parsed = Number(value ?? defaultValue);
-    return Number.isSafeInteger(parsed) && parsed >= 0 ? parsed : Number(defaultValue);
-  }
-
   /**
    * Whether an explicitly-set numeric var is a usable positive integer.
    *

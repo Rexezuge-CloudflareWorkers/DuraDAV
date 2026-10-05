@@ -1,5 +1,5 @@
 import { BaseDAO } from './BaseDAO';
-import { advanceCursorStatement, beginPassStatement, recordRunStatement } from './replicationPassSql';
+import { beginPassStatement, recordRunStatement } from './replicationPassSql';
 import type { D1Queryable } from '../utils/D1Types';
 
 /**
@@ -64,19 +64,14 @@ type ReplicationTarget = {
   remotePath: string;
 };
 
-function toTarget(row: DavReplicationRow): ReplicationTarget {
-  return {
-    targetKind: row.target_kind === 'dav-volume' ? 'dav-volume' : 'dav',
-    remoteUrl: row.remote_url,
-    remoteOwner: row.remote_owner,
-    remoteVolume: row.remote_volume,
-    remotePath: row.remote_path,
-  };
-}
-
 /**
- * Statements that are shared with `replicationPassSql` or reused by more than one
- * method live here so the retry wrapper is applied at the call site rather than
+ * Statements shared with `replicationPassSql` or reused by more than one method
+ * live there or here, so the retry wrapper is applied at the call site rather than
+ * forgotten inside a helper.
+ */
+/**
+ * Statements shared with `replicationPassSql` or reused by more than one method
+ * live there or here, so the retry wrapper is applied at the call site rather than
  * forgotten inside a helper.
  */
 function listByVolumeStatement(database: D1Queryable, volumeId: string): Promise<{ results?: DavReplicationRow[] }> {
@@ -273,14 +268,6 @@ class DavReplicationDAO extends BaseDAO {
   }
 
   /**
-   * Park the sweep position between ticks. See `replicationPassSql` for what
-   * `remaining` counts and why.
-   */
-  public async advanceCursor(replicationId: string, cursorPath: string | null, remaining: number, now: number): Promise<void> {
-    await this.withRetry(() => advanceCursorStatement(this.database, replicationId, cursorPath, remaining, now), 'advance dav replication cursor');
-  }
-
-  /**
    * Record the outcome of one tick, and open or close the deletion gate.
    *
    * See `replicationPassSql`: the gate closes when the pass failed or finished with
@@ -301,16 +288,6 @@ class DavReplicationDAO extends BaseDAO {
     );
   }
 
-  public async setEnabled(replicationId: string, enabled: boolean, now: number): Promise<void> {
-    await this.update(replicationId, { enabled, now });
-  }
-
-  /**
-  Target identity of an existing row, for change detection on reconfigure.
-  */
-  public targetOf(row: DavReplicationRow): ReplicationTarget {
-    return toTarget(row);
-  }
 }
 
 export { DavReplicationDAO };

@@ -225,7 +225,18 @@ describe('DavReadCache helpers', () => {
   it('assigns private cache-control per kind', () => {
     expect(cacheControlFor('file')).toContain('private');
     expect(cacheControlFor('propfind')).toContain('private');
-    expect(cacheControlFor('meta')).toContain('private');
+    // A file's window is longer than a propfind's, and the difference is the point:
+    // the body is immutable per etag while a multistatus reflects sibling changes.
+    expect(cacheControlFor('file')).not.toBe(cacheControlFor('propfind'));
+  });
+
+  it('rejects a shape it does not know, rather than silently using a default', () => {
+    // The parameter is the closed `CachedShape` union, so a typo is a compile error.
+    // It was a bare `string` and any other value fell through to `max-age=30` —
+    // this asserts that the type is doing the work, at runtime as well, because a
+    // cast from untyped JSON would otherwise reintroduce the silent default.
+    // @ts-expect-error deliberately wrong shape: proves the union is closed
+    expect(() => cacheControlFor('meta')).toThrow();
   });
 
   it('round-trips base64 file bodies', () => {

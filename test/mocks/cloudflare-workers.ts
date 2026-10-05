@@ -1,18 +1,20 @@
+/**
+ * `cloudflare:workers` stand-in for the unit suite.
+ *
+ * Aliased in both Vitest configs so a module that imports the platform module can
+ * be loaded under the `node` environment. The integration suite does not use
+ * this — it runs on the real workerd, where these classes are genuine.
+ *
+ * Only what is actually imported by a unit test is exported. A symbol here that
+ * nothing imports is not a safety net; it is a claim that something depends on it.
+ */
+
 class DurableObject<TEnv = Env> {
   protected ctx: DurableObjectState;
   protected env: TEnv;
 
   constructor(ctx: DurableObjectState, env: TEnv) {
     this.ctx = ctx;
-    this.env = env;
-  }
-}
-
-class WorkflowEntrypoint<TEnv = Env, _TPayload = unknown> {
-  protected env: TEnv;
-
-  constructor(ctx: unknown, env: TEnv) {
-    void ctx;
     this.env = env;
   }
 }
@@ -33,4 +35,4 @@ class WorkflowEntrypoint<TEnv = Env, _TPayload = unknown> {
  */
 class RpcTarget {}
 
-export { DurableObject, WorkflowEntrypoint, RpcTarget };
+export { DurableObject, RpcTarget };

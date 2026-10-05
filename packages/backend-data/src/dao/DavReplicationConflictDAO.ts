@@ -93,12 +93,6 @@ class DavReplicationConflictDAO extends BaseDAO {
     return (result.meta?.changes ?? 0) > 0;
   }
 
-  public async deleteForReplication(replicationId: string): Promise<void> {
-    await this.withRetry(
-      () => this.database.prepare('DELETE FROM dav_replication_conflicts WHERE replication_id = ?').bind(replicationId).run(),
-      'delete dav replication conflicts',
-    );
-  }
 }
 
 export { DavReplicationConflictDAO };

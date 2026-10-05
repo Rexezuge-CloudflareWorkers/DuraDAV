@@ -92,11 +92,27 @@ function isFresh(request: Request, etag: string | null): boolean {
  * (`contentTtls`): the origin controls revalidation, and a browser that
  * heuristic-freshness-refreshes on a stale body is a smaller problem than one
  * that holds a body past the window the origin declared.
+ *
+ * Takes the union rather than a `string` so a new cached shape cannot fall
+ * through to a default `max-age`. It did: a bare `string` parameter meant a
+ * typo became `max-age=30` with nothing at the call site to notice, and the
+ * `'meta'` branch was reachable only by a call that had been removed as
+ * "unreachable intent" (`VolumeRoutes`).
  */
-function cacheControlFor(kind: string): string {
+function cacheControlFor(kind: CachedShape): string {
   if (kind === 'file') return 'private, max-age=300, must-revalidate';
-  return kind === 'propfind' ? 'private, max-age=60, must-revalidate' : 'private, max-age=30, must-revalidate';
+  if (kind === 'propfind') return 'private, max-age=60, must-revalidate';
+  // Unreachable through the type, and deliberately so: a caller reaching this with
+  // an unknown shape has a bug that a silent `max-age=30` would hide. The bare
+  // `string` parameter it replaced had exactly that fall-through, which is why the
+  // `'meta'` branch survived after the only call that used it was deleted.
+  throw new Error(`unknown cached response shape: ${JSON.stringify(kind)}`);
 }
+
+/**
+The two cacheable response shapes. Closed, so `cacheControlFor` cannot be handed a typo.
+*/
+type CachedShape = 'file' | 'propfind';
 
 function hashBody(value: string): string {
   return digest128(value);
