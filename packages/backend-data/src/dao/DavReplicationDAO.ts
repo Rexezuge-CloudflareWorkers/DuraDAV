@@ -74,6 +74,11 @@ function toTarget(row: DavReplicationRow): ReplicationTarget {
   };
 }
 
+/**
+ * Statements that are shared with `replicationPassSql` or reused by more than one
+ * method live here so the retry wrapper is applied at the call site rather than
+ * forgotten inside a helper.
+ */
 function listByVolumeStatement(database: D1Queryable, volumeId: string): Promise<{ results?: DavReplicationRow[] }> {
   return database
     .prepare('SELECT * FROM dav_replications WHERE volume_id = ? ORDER BY created_at ASC')
@@ -152,15 +157,25 @@ class DavReplicationDAO extends BaseDAO {
   }
 
   public async listByVolume(volumeId: string): Promise<DavReplicationRow[]> {
-    const result = await listByVolumeStatement(this.database, volumeId);
-    return result.results ?? [];
+    return this.allWithRetry(() => listByVolumeStatement(this.database, volumeId), 'list dav replications by volume');
   }
 
+  /**
+   * How many targets a bucket has, for the per-bucket replication cap.
+   *
+   * `firstWithRetry` rather than a bare `.first()`, as everywhere else in this
+   * package: the caller uses the count to *reject* a creation, so a count that
+   * degraded on a D1 blip would let the cap be bypassed.
+   */
   public async countByVolume(volumeId: string): Promise<number> {
-    const row = await this.database
-      .prepare('SELECT COUNT(*) AS cnt FROM dav_replications WHERE volume_id = ?')
-      .bind(volumeId)
-      .first<{ cnt: number }>();
+    const row = await this.firstWithRetry(
+      () =>
+        this.database
+          .prepare('SELECT COUNT(*) AS cnt FROM dav_replications WHERE volume_id = ?')
+          .bind(volumeId)
+          .first<{ cnt: number }>(),
+      'count dav replications by volume',
+    );
     return row?.cnt ?? 0;
   }
 
@@ -232,16 +247,19 @@ class DavReplicationDAO extends BaseDAO {
    * the SQLite version D1 happens to ship this month.
    */
   public async listDue(now: number, limit: number): Promise<DavReplicationRow[]> {
-    const result = await this.database
-      .prepare(
-        `SELECT * FROM dav_replications
-         WHERE enabled = 1 AND (last_run_at IS NULL OR last_run_at + interval_minutes * 60 <= ?)
-         ORDER BY COALESCE(last_run_at, 0) ASC, replication_id ASC
-         LIMIT ?`,
-      )
-      .bind(now, limit)
-      .all<DavReplicationRow>();
-    return result.results ?? [];
+    return this.allWithRetry<DavReplicationRow>(
+      () =>
+        this.database
+          .prepare(
+            `SELECT * FROM dav_replications
+             WHERE enabled = 1 AND (last_run_at IS NULL OR last_run_at + interval_minutes * 60 <= ?)
+             ORDER BY COALESCE(last_run_at, 0) ASC, replication_id ASC
+             LIMIT ?`,
+          )
+          .bind(now, limit)
+          .all<DavReplicationRow>(),
+      'list due dav replications',
+    );
   }
 
   /**

@@ -1,5 +1,5 @@
 import type { D1Queryable, D1Result } from '../utils/D1Types';
-import { D1_RETRY_DEFAULTS, executeD1WithRetry, sleep } from '../utils/D1Utils';
+import { D1_RETRY_DEFAULTS, backoffMs as d1BackoffMs, executeD1WithRetry, sleep } from '../utils/D1Utils';
 import { isD1ErrorRetryable } from '../utils/D1ErrorClassifier';
 import { DatabaseError } from '@durable-dav/backend-errors';
 
@@ -30,8 +30,35 @@ abstract class BaseDAO {
    * failure surfaced as an opaque 500 instead.
    *
    * `first()` resolves to `null` for "no row", which is a success, not an error;
-   * only a rejected statement goes through `executeD1WithRetry`.
+   * only a rejected statement is retried.
+   *
+   * The backoff comes from `d1BackoffMs` rather than an inlined
+   * `baseDelayMs * 2 ** attempt`, because `D1_RETRY_DEFAULTS` is exported
+   * precisely so the read and write schedules cannot drift — and an inlined copy
+   * of the formula is exactly the drift it was meant to prevent. The unreachable
+   * tail `throw` below is retained: `maxRetries` is a constant, but a loop whose
+   * only exit is a `throw` inside `catch` is not provably exhaustive to the type
+   * checker.
    */
+  /**
+   * Multi-row read, with the same retry and `DatabaseError` normalization.
+   *
+   * Separate from `withRetry` because that one is typed for a write's `D1Result`
+   * and reads `result.success` off it — a shape `.all()` does not return. Both
+   * existed as an accident of which helper each caller happened to reach for;
+   * a list read had no retry at all.
+   *
+   * `.all()` returning `[]` for "no rows" is a success like `first()`'s `null`.
+   */
+  protected async allWithRetry<T>(operation: () => Promise<{ results?: T[] }>, context: string): Promise<T[]> {
+    const statement = async (): Promise<{ success: true; results: T[] }> => {
+      const rows = await operation();
+      return { success: true, results: rows.results ?? [] };
+    };
+    const result = await executeD1WithRetry<{ results: T[] }>(statement, context);
+    return result.results;
+  }
+
   protected async firstWithRetry<T>(operation: () => Promise<T | null>, context: string): Promise<T | null> {
     for (let attempt = 0; attempt <= D1_RETRY_DEFAULTS.maxRetries; attempt += 1) {
       try {
@@ -40,7 +67,7 @@ abstract class BaseDAO {
         const message: string = error instanceof Error ? error.message : String(error);
         const retryable: boolean = isD1ErrorRetryable(message);
         if (retryable && attempt < D1_RETRY_DEFAULTS.maxRetries) {
-          await sleep(D1_RETRY_DEFAULTS.baseDelayMs * Math.pow(2, attempt));
+          await sleep(d1BackoffMs(D1_RETRY_DEFAULTS.baseDelayMs, attempt));
           continue;
         }
         throw new DatabaseError(`Failed to ${context}: ${message}`, retryable);

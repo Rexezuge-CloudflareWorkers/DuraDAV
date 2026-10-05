@@ -53,25 +53,35 @@ class UserEmailDAO extends BaseDAO {
     // Lowercase the *parameter*: the column is stored lowercased by every
     // writer, so `lower(email) = ?` matched identically while making
     // `idx_user_emails` (the primary key) unusable.
-    return this.database.prepare('SELECT * FROM user_emails WHERE email = ? LIMIT 1').bind(email.toLowerCase()).first<UserEmailRow>();
+    return this.firstWithRetry(
+      () => this.database.prepare('SELECT * FROM user_emails WHERE email = ? LIMIT 1').bind(email.toLowerCase()).first<UserEmailRow>(),
+      'get user email',
+    );
   }
 
   /**
    * Login resolution: only a verified address identifies an account.
    */
   public async resolveVerified(email: string): Promise<UserEmailRow | null> {
-    return this.database
-      .prepare('SELECT * FROM user_emails WHERE email = ? AND is_verified = 1 LIMIT 1')
-      .bind(email.toLowerCase())
-      .first<UserEmailRow>();
+    return this.firstWithRetry(
+      () =>
+        this.database
+          .prepare('SELECT * FROM user_emails WHERE email = ? AND is_verified = 1 LIMIT 1')
+          .bind(email.toLowerCase())
+          .first<UserEmailRow>(),
+      'resolve verified user email',
+    );
   }
 
   public async listByUserId(userId: string): Promise<UserEmailRow[]> {
-    const result = await this.database
-      .prepare('SELECT * FROM user_emails WHERE user_id = ? ORDER BY is_verified DESC, created_at ASC')
-      .bind(userId)
-      .all<UserEmailRow>();
-    return result.results ?? [];
+    return this.allWithRetry<UserEmailRow>(
+      () =>
+        this.database
+          .prepare('SELECT * FROM user_emails WHERE user_id = ? ORDER BY is_verified DESC, created_at ASC')
+          .bind(userId)
+          .all<UserEmailRow>(),
+      'list user emails by user id',
+    );
   }
 
   /**

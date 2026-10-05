@@ -4,7 +4,7 @@ import { useTranslation } from 'react-i18next';
 import { Button } from '../ui/Button';
 import { Input, Label } from '../ui/Input';
 import { ModalShell } from './ModalShell';
-import { COPY_FEEDBACK_TIMEOUT_MS } from '../../lib/constants';
+import { useCopyToClipboard } from '../../hooks/useCopyToClipboard';
 
 export function TypeToConfirmModal({
   title,
@@ -25,18 +25,9 @@ export function TypeToConfirmModal({
 }) {
   const { t } = useTranslation();
   const [input, setInput] = useState('');
-  const [copied, setCopied] = useState(false);
+  const { copied, copy } = useCopyToClipboard();
 
   const matched = input.trim() === expectedName;
-
-  const handleCopy = () => {
-    const clipboard = globalThis.navigator?.clipboard as Clipboard | undefined;
-    if (clipboard) {
-      void clipboard.writeText(expectedName).catch(() => undefined);
-    }
-    setCopied(true);
-    setTimeout(() => setCopied(false), COPY_FEEDBACK_TIMEOUT_MS);
-  };
 
   return (
     <ModalShell onClose={onCancel} widthClass="w-full max-w-md mx-4" ariaLabel={title}>
@@ -52,7 +43,7 @@ export function TypeToConfirmModal({
           </code>
           <button
             type="button"
-            onClick={handleCopy}
+            onClick={() => copy(expectedName)}
             title={t('common.copyToClipboard', 'Copy To Clipboard')}
             aria-label={t('common.copyToClipboard', 'Copy To Clipboard')}
             className="px-2.5 py-2 rounded-lg bg-[var(--color-surface-3)] hover:bg-[var(--color-surface-4)] border border-[var(--color-border)] text-[var(--color-text-secondary)] transition-colors duration-150"

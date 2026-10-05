@@ -47,22 +47,29 @@ class DavReplicationConflictDAO extends BaseDAO {
   }
 
   public async listByReplication(replicationId: string, includeResolved: boolean, limit = 200): Promise<DavReplicationConflictRow[]> {
-    const result = await this.database
-      .prepare(
-        `SELECT * FROM dav_replication_conflicts
-         WHERE replication_id = ? ${includeResolved ? '' : 'AND resolved_at IS NULL'}
-         ORDER BY detected_at DESC LIMIT ?`,
-      )
-      .bind(replicationId, limit)
-      .all<DavReplicationConflictRow>();
-    return result.results ?? [];
+    return this.allWithRetry<DavReplicationConflictRow>(
+      () =>
+        this.database
+          .prepare(
+            `SELECT * FROM dav_replication_conflicts
+             WHERE replication_id = ? ${includeResolved ? '' : 'AND resolved_at IS NULL'}
+             ORDER BY detected_at DESC LIMIT ?`,
+          )
+          .bind(replicationId, limit)
+          .all<DavReplicationConflictRow>(),
+      'list dav replication conflicts',
+    );
   }
 
   public async countUnresolved(replicationId: string): Promise<number> {
-    const row = await this.database
-      .prepare('SELECT COUNT(*) AS cnt FROM dav_replication_conflicts WHERE replication_id = ? AND resolved_at IS NULL')
-      .bind(replicationId)
-      .first<{ cnt: number }>();
+    const row = await this.firstWithRetry(
+      () =>
+        this.database
+          .prepare('SELECT COUNT(*) AS cnt FROM dav_replication_conflicts WHERE replication_id = ? AND resolved_at IS NULL')
+          .bind(replicationId)
+          .first<{ cnt: number }>(),
+      'count unresolved dav replication conflicts',
+    );
     return row?.cnt ?? 0;
   }
 
