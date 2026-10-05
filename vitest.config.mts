@@ -13,7 +13,6 @@ const backendServicesSrcPath = fileURLToPath(new URL('packages/backend-services/
 const webSrcPath = fileURLToPath(new URL('apps/web/src', import.meta.url));
 const cloudflareSocketsMockPath = fileURLToPath(new URL('test/mocks/cloudflare-sockets.ts', import.meta.url));
 const cloudflareWorkersMockPath = fileURLToPath(new URL('test/mocks/cloudflare-workers.ts', import.meta.url));
-const cloudflareWorkflowsMockPath = fileURLToPath(new URL('test/mocks/cloudflare-workflows.ts', import.meta.url));
 
 export default defineConfig({
   test: {
@@ -84,7 +83,6 @@ export default defineConfig({
       { find: '@durable-dav/shared', replacement: sharedSrcPath },
       { find: 'cloudflare:sockets', replacement: cloudflareSocketsMockPath },
       { find: 'cloudflare:workers', replacement: cloudflareWorkersMockPath },
-      { find: 'cloudflare:workflows', replacement: cloudflareWorkflowsMockPath },
       { find: /^@\//, replacement: `${apiSrcPath}/` },
       // Web-app imports. `~/` maps to the SPA root so tests can reach web
       // modules; the bare specifiers let Vite resolve their own relative

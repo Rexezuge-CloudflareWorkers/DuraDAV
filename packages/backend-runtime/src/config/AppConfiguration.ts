@@ -1,5 +1,5 @@
 import { EnvParser } from './EnvParser';
-import { DEFAULT_DEBUG_MODE, DEFAULT_SITE_URL } from './ConfigurationDefaults';
+import { DEFAULT_SITE_URL } from './ConfigurationDefaults';
 
 import { AuthConfig } from './sections/AuthConfig';
 import { DavLimits } from './sections/DavLimits';
@@ -9,11 +9,14 @@ import { VolumeLimits } from './sections/VolumeLimits';
 /**
  * Injectable instance view over Durable-DAV environment configuration.
  *
- * Composed of focused section objects (`VolumeLimits`, `DavLimits`,
- * `AuthConfig`, `ReplicationConfig`) so the facade stays thin.
- * `ConfigurationManager` statics delegate here for backward compatibility. New
- * code should accept `AppConfiguration` via constructor injection so env
- * parsing is stubbable.
+ * A thin facade over focused section objects (`VolumeLimits`, `DavLimits`,
+ * `AuthConfig`, `ReplicationConfig`), each of which owns one group of
+ * `AppConfiguration` getters so env parsing lives in one place per concern.
+ *
+ * Accept `AppConfiguration` by constructor injection so env parsing is stubbable;
+ * the section objects are deliberately **not** exposed as getters. They were, and
+ * nothing used them: a caller holding a section bypasses the facade and reaches
+ * `EnvParser` on its own, which is the coupling the facade exists to prevent.
  */
 class AppConfiguration {
   private readonly volumes: VolumeLimits;
@@ -30,22 +33,6 @@ class AppConfiguration {
 
   public static fromEnv(env: unknown): AppConfiguration {
     return new AppConfiguration(env);
-  }
-
-  public get volumeLimits(): VolumeLimits {
-    return this.volumes;
-  }
-
-  public get davLimits(): DavLimits {
-    return this.dav;
-  }
-
-  public get authConfig(): AuthConfig {
-    return this.auth;
-  }
-
-  public get replicationConfig(): ReplicationConfig {
-    return this.replication;
   }
 
   public getReplicationSweepLimit(): number {
@@ -86,10 +73,6 @@ class AppConfiguration {
 
   public isReplicationHashOnAmbiguous(): boolean {
     return this.replication.isReplicationHashOnAmbiguous();
-  }
-
-  public getDebugMode(): boolean {
-    return EnvParser.boolean(this.env, 'DEBUG_MODE', DEFAULT_DEBUG_MODE);
   }
 
   public getSiteUrl(): string {

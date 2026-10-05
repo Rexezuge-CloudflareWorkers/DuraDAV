@@ -8,23 +8,20 @@ import { Logo } from './Logo';
  * geometry (sticky, `max-w-7xl mx-auto px-6`), so the logo/home anchor never
  * moves between pages.
  */
-export function ContextBar({ crumb, actions, bare = false }: { crumb: React.ReactNode; actions?: React.ReactNode; bare?: boolean }) {
+export function ContextBar({ crumb, actions }: { crumb: React.ReactNode; actions?: React.ReactNode }) {
   const { t } = useTranslation();
-  const row = (
-    <div className="max-w-7xl mx-auto px-6 py-3 flex items-center gap-3 flex-wrap">
-      <Link to="/" aria-label={t('header.home', 'Durable-DAV Home')} className="shrink-0">
-        <Logo />
-      </Link>
-      <span aria-hidden="true" className="text-[var(--color-text-muted)] font-normal">
-        /
-      </span>
-      <div className="flex items-center gap-2 min-w-0 flex-1">{crumb}</div>
-      {actions && <div className="ml-auto flex items-center gap-2 shrink-0">{actions}</div>}
+  return (
+    <div className="sticky top-0 z-40 border-b border-[var(--color-border)] bg-[var(--color-surface-1)]/95 backdrop-blur">
+      <div className="max-w-7xl mx-auto px-6 py-3 flex items-center gap-3 flex-wrap">
+        <Link to="/" aria-label={t('header.home', 'Durable-DAV Home')} className="shrink-0">
+          <Logo />
+        </Link>
+        <span aria-hidden="true" className="text-[var(--color-text-muted)] font-normal">
+          /
+        </span>
+        <div className="flex items-center gap-2 min-w-0 flex-1">{crumb}</div>
+        {actions && <div className="ml-auto flex items-center gap-2 shrink-0">{actions}</div>}
+      </div>
     </div>
-  );
-  return bare ? (
-    row
-  ) : (
-    <div className="sticky top-0 z-40 border-b border-[var(--color-border)] bg-[var(--color-surface-1)]/95 backdrop-blur">{row}</div>
   );
 }
