@@ -1,3 +1,4 @@
+export { base64ToBytes, bytesToBase64 } from './Base64';
 export { TimestampUtil } from './TimestampUtil';
 export { UUIDUtil } from './UUIDUtil';
 export { CryptoUtil } from './CryptoUtil';

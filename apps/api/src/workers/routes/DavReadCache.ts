@@ -1,6 +1,7 @@
 import type { KvCache } from '@durable-dav/backend-runtime/kv';
 import { digest128, invalidateDavVolumeCaches } from '@durable-dav/backend-runtime/kv';
 import { normalizeVolumeKey } from '@durable-dav/webdav';
+import {  bytesToBase64 } from '@durable-dav/shared/utils';
 
 // KV-backed read cache for DAV RPCs (Git `RepoReadCache` pattern).
 // D1/DO stay authoritative; KV is loss-tolerant. All keys use the canonical
@@ -160,22 +161,6 @@ async function putCachedPropfind(
   }
 }
 
-function bytesToBase64(bytes: Uint8Array): string {
-  let binary = '';
-  const chunk = 8192;
-  for (let i = 0; i < bytes.length; i += chunk) {
-    binary += String.fromCodePoint(...bytes.subarray(i, i + chunk));
-  }
-  return btoa(binary);
-}
-
-function base64ToBytes(b64: string): Uint8Array {
-  const binary = atob(b64);
-  const out = new Uint8Array(binary.length);
-  for (let i = 0; i < binary.length; i += 1) out[i] = (binary.codePointAt(i) ?? 0) & 0xff;
-  return out;
-}
-
 async function getCachedFile(cache: KvCache, owner: string, volume: string, innerPath: string): Promise<CachedFile | null> {
   if (!isCacheablePath(innerPath)) return null;
   try {
@@ -248,10 +233,12 @@ export {
   getCachedFile,
   putCachedFile,
   invalidateVolumeCaches,
-  bytesToBase64,
-  base64ToBytes,
+  
+  
   invalidatesReadCache,
   isCacheablePath,
   contentTtls,
 };
 export type { CachedPropfind, CachedFile };
+
+export {base64ToBytes, bytesToBase64} from '@durable-dav/shared/utils';

@@ -1,3 +1,5 @@
+import { base64ToBytes, bytesToBase64 } from '@durable-dav/shared/utils';
+
 /**
  * AES-GCM envelope for values that must be recoverable.
  *
@@ -15,6 +17,15 @@
  * to configure a key, and nothing would report it.
  */
 
+/**
+ * Base64 for the key and the envelope.
+ *
+ * The shared codec rather than a local copy: this file ran the `atob`/`btoa`
+ * round trip inline, and its encoder was the spread-and-`btoa` form the shared
+ * implementation exists to replace — allocating ~2× the input as UTF-16 on every
+ * secret write.
+ */
+
 const KEY_BYTES = 32;
 const IV_BYTES = 12;
 
@@ -23,22 +34,6 @@ class ReplicationKeyError extends Error {
     super(message);
     this.name = 'ReplicationKeyError';
   }
-}
-
-function base64ToBytes(value: string): Uint8Array {
-  const binary = atob(value);
-  const out = new Uint8Array(binary.length);
-  for (let i = 0; i < binary.length; i += 1) out[i] = (binary.codePointAt(i) ?? 0) & 0xff;
-  return out;
-}
-
-function bytesToBase64(bytes: Uint8Array): string {
-  let binary = '';
-  const chunk = 8192;
-  for (let i = 0; i < bytes.length; i += chunk) {
-    binary += String.fromCodePoint(...bytes.subarray(i, i + chunk));
-  }
-  return btoa(binary);
 }
 
 async function importKey(encodedKey: string | undefined | null): Promise<CryptoKey> {
