@@ -6,10 +6,28 @@ import type { ReplicaStateRow } from '@durable-dav/dav-store';
 const logger = createLogger('Replication');
 
 /**
+One collection listing from the local volume DO, with its completeness claim.
+*/
+type ReplicaListing = {
+  entries: RemoteEntry[];
+  complete: boolean;
+};
+
+/**
 The slice's view of the volume Durable Object holding the local side.
 */
 export interface LocalReplicaStub {
-  listReplicaChildren(path: string): Promise<RemoteEntry[]>;
+  /**
+   * Direct children of one collection, with the volume's own statement of
+   * whether the listing is complete.
+   *
+   * The flag is checked on the local side too, not just the remote's. A partial
+   * local listing makes a path look absent from *this* bucket, which is not
+   * destructive the way a false remote absence is — it queues a pull instead of a
+   * delete — but it is still the planner acting on evidence that does not exist,
+   * and it can overwrite a local copy with a stale remote one.
+   */
+  listReplicaChildren(path: string): Promise<ReplicaListing>;
   readReplicaStream(path: string): Promise<ReadableStream<Uint8Array> | null>;
   readReplicaBytes(path: string): Promise<Uint8Array | null>;
   applyReplicaOperations(replicationId: string, operations: unknown[]): Promise<{ applied: number; failed: number; error: string | null }>;
@@ -83,13 +101,18 @@ async function collectSlice(options: CollectSliceOptions): Promise<Slice> {
     queued.delete(current);
     cursor = current;
 
-    const localChildren = await localStub.listReplicaChildren(current).catch((error: unknown) => {
+    const localListing = await localStub.listReplicaChildren(current).catch((error: unknown) => {
       errors += 1;
       if (firstError === null) firstError = `listing ${current} locally: ${describe(error)}`;
       logger.warn(`listing ${current} locally failed`, error);
-      return [] as RemoteEntry[];
+      return { entries: [] as RemoteEntry[], complete: false } satisfies ReplicaListing;
     });
-    for (const entry of localChildren) {
+    // Symmetric with the remote check below, and load-bearing for the same reason.
+    // A partial local listing means paths in this collection are missing from the
+    // local view, and the planner will read each of those as "not here" and queue
+    // a pull — which can overwrite a good local copy with a stale remote one.
+    if (!localListing.complete) complete = false;
+    for (const entry of localListing.entries) {
       localByPath.set(entry.path, entry);
       if (!entry.isCollection || queued.has(entry.path) || visited.has(entry.path)) {
         continue;
@@ -110,6 +133,11 @@ async function collectSlice(options: CollectSliceOptions): Promise<Slice> {
     }
     // A remote that reports an incomplete listing has just told us its absences
     // are meaningless, and that is precisely what the deletion gate acts on.
+    //
+    // Sticky, not per-collection: one incomplete listing anywhere in the walk
+    // makes *every* absence in this slice untrustworthy, because the planner is
+    // handed one combined view of both sides and cannot tell which collection an
+    // individual missing path belonged to.
     if (!listing.complete) complete = false;
     for (const entry of listing.entries) {
       remoteByPath.set(entry.path, entry);

@@ -30,6 +30,14 @@ lerna-debug.log*
 
 report.[0-9]_.[0-9]_.[0-9]_.[0-9]_.json
 
+# Core dumps. A crashed `node`/`workerd` writes a multi-gigabyte `core.<pid>`
+# into the working directory, which is untracked, never reviewed, and only
+# discovered when something tries to commit it.
+
+core
+core.*
+*.core
+
 # Runtime data
 
 pids

@@ -2,19 +2,19 @@
 import { deleteNodeCascade, getDeadProperties, renameNodeCascade, upsertNode } from '@durable-dav/dav-store';
 import type { DirEntry as DofsChildEntry, DofsFs, DurableSqlStorage } from '@durable-dav/dav-store';
 import { normalizeLockDetails, type DavNodeInfo, type LockDetails } from '@durable-dav/webdav';
-import { fsPathOf, hrefOf, MAX_PATH_DEPTH } from './DavContext';
+import { hrefOf, MAX_PATH_DEPTH } from './DavContext';
+import { DavReadPolicy, type StatResult } from './davReadPolicy';
 
 // Repository over dofs + DO SQLite (why: the DO previously inlined every
 // `dav_nodes/props/locks` statement, duplicating `dav-store/meta.ts` and
 // swallowing failures per call site; centralizing here keeps SQL in one
 // audited place and lets method handlers stay I/O-orchestration only).
-
-interface StatResult {
-  exists: boolean;
-  isDirectory: boolean;
-  size: number;
-  mtime: number;
-}
+//
+// The `dofs` half is delegated to `DavReadPolicy`, which owns the one decision
+// this class used to make four separate times: how a failed read is answered.
+// Every method named `require*` below is the `'throw'` policy and every other one
+// is `'degrade'`; the pairing is what keeps a caller that reads absences from
+// mistaking a storage fault for a deletion.
 
 interface NodeMeta {
   contentType?: string;
@@ -23,21 +23,45 @@ interface NodeMeta {
   crtime?: number;
 }
 
+/**
+ * How a failed read is answered. See `listing` for why this is a parameter
+ * rather than a naming convention.
+ */
 class DavRepository {
+  private readonly reads: DavReadPolicy;
+
   constructor(
     private readonly dofs: DofsFs,
     private readonly sql: DurableSqlStorage,
-  ) {}
-
-  public statInner(innerPath: string): StatResult {
-    try {
-      const st = this.dofs.stat(fsPathOf(innerPath));
-      return { exists: true, isDirectory: st.isDirectory, size: st.size ?? 0, mtime: st.mtime ?? Date.now() };
-    } catch {
-      return { exists: false, isDirectory: false, size: 0, mtime: 0 };
-    }
+  ) {
+    this.reads = new DavReadPolicy(dofs);
   }
 
+  public statInner(innerPath: string): StatResult {
+    return this.reads.stat(innerPath, 'degrade');
+  }
+
+  /**
+   * `statInner` for a caller that will act on the answer.
+   *
+   * The degrading form reports a failed read as `exists: false`, which is
+   * indistinguishable from a deleted resource — so a caller deciding whether a
+   * path is still there would treat a storage error as an absence. Every
+   * replication listing walk pairs with this one for exactly that reason.
+   */
+  public requireStatInner(innerPath: string): StatResult {
+    return this.reads.stat(innerPath, 'throw');
+  }
+
+  /**
+   * Recorded metadata for one path, or `{}` when there is no row or the read fails.
+   *
+   * `'degrade'` only. Every node this class answers for was created by a
+   * filesystem operation that writes a metadata row *after* the bytes, so a
+   * missing row is a normal state on a fresh volume rather than a fault, and
+   * `nodeInfo` falls back to the filesystem's own mtime for it. A caller must not
+   * treat the absence of metadata as evidence that the resource is gone.
+   */
   public readMeta(innerPath: string): NodeMeta {
     try {
       const rows = this.sql.exec(`SELECT content_type, etag, mtime, crtime FROM dav_nodes WHERE path = ?`, innerPath).toArray();
@@ -148,21 +172,6 @@ class DavRepository {
     };
   }
 
-  /**
-   * Paths of every descendant of `innerPath`, or `[]` when the collection is
-   * empty.
-   *
-   * Distinct from `listRecursive`, which **swallows** a listing failure and
-   * returns `[]`. That is the right answer for "render a listing" and the
-   * wrong one for "is any descendant locked": a transient storage error would
-   * make an empty list indistinguishable from "nothing is locked", and the
-   * caller's answer would be to delete a locked subtree. This variant throws
-   * instead, so a caller deciding on lock state fails closed.
-   */
-  public requireRecursive(innerPath: string): string[] {
-    return this.dofs.listDir(fsPathOf(innerPath), { recursive: true }).filter((n) => n !== '.' && n !== '..');
-  }
-
   public rootNode(): DavNodeInfo {
     const now = new Date();
     return {
@@ -180,56 +189,50 @@ class DavRepository {
   }
 
   public listChildren(innerPath: string): string[] {
-    try {
-      return this.dofs.listDir(fsPathOf(innerPath), {}).filter((n) => n !== '.' && n !== '..');
-    } catch {
-      return [];
-    }
+    return this.reads.list(innerPath, false, 'degrade');
   }
 
   public listRecursive(innerPath: string): string[] {
-    try {
-      return this.dofs.listDir(fsPathOf(innerPath), { recursive: true }).filter((n) => n !== '.' && n !== '..');
-    } catch {
-      return [];
-    }
+    return this.reads.list(innerPath, true, 'degrade');
+  }
+
+  /**
+   * Direct children for a caller deciding on their absence.
+   *
+   * The pairing with `listChildren` is the point. `VolumeReplicationRpc` wanted
+   * this one — a listing it was going to read absences *from* — and took
+   * `listChildren` instead, because the throwing non-recursive variant did not
+   * exist and the degrading one was the only one on offer.
+   */
+  public requireChildren(innerPath: string): string[] {
+    return this.reads.list(innerPath, false, 'throw');
+  }
+
+  /**
+   * Every descendant, for a caller deciding on their absence — lock enumeration
+   * over DELETE and MOVE.
+   */
+  public requireRecursive(innerPath: string): string[] {
+    return this.reads.list(innerPath, true, 'throw');
   }
 
   /**
    * One page of direct children, as `{name, isDirectory}`.
    *
-   * `listChildren` cannot back a pager: it materialises every name from one
-   * unbounded scan and discards the `is_dir` column that scan already reads, so
-   * ordering collections-first would cost a `statInner` per name. This carries
-   * `isDirectory` out of the same query and stops at the page boundary, so a
-   * caller hydrates `limit` children instead of all of them.
-   *
-   * Ordering is the server's, not the browser's — see `listDirPage`'s comment on
-   * why the trailing binary `name` tiebreak is load-bearing. Failures return an
-   * empty page (matching `listChildren`), which the caller cannot distinguish
-   * from an empty directory; that is deliberate, since a pager that reported an
-   * error would have to invent a total it does not have.
+   * Ordering is the server's, not the browser's — see `DavReadPolicy.listPage` on
+   * why the trailing binary `name` tiebreak is load-bearing. `'degrade'` only: the
+   * pager cannot report an error without inventing a total it does not have, and
+   * a wrong page count would be worse than a short page.
    */
   public listChildPage(innerPath: string, offset: number, limit: number): DofsChildEntry[] {
-    try {
-      return this.dofs.listDirPage(fsPathOf(innerPath), { offset, limit });
-    } catch {
-      return [];
-    }
+    return this.reads.listPage(innerPath, offset, limit, 'degrade');
   }
 
   /**
    * Direct child count, for a pager's total and its last-page clamp.
-   *
-   * `COUNT(*)` over `idx_dofs_files_parent` rather than `listChildren().length`,
-   * which would read every row to count it.
    */
   public countChildren(innerPath: string): number {
-    try {
-      return this.dofs.countChildren(fsPathOf(innerPath));
-    } catch {
-      return 0;
-    }
+    return this.reads.countChildren(innerPath, 'degrade');
   }
 
   /**
@@ -325,4 +328,6 @@ class DavRepository {
 }
 
 export { DavRepository };
-export type { StatResult, NodeMeta };
+export type {  NodeMeta };
+
+export {type StatResult} from './davReadPolicy';

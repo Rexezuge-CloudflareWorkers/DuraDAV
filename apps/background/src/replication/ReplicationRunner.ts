@@ -146,7 +146,14 @@ class ReplicationRunner {
       // tell "nothing to do" from "could not see the whole tree". Both count as
       // dirty, though: a pass that could not read a collection has not verified
       // anything about it, and reporting `ok` would claim it had.
-      const dirty = outcome.errors > 0 || slice.errors > 0;
+      //
+      // `!slice.complete` rather than `slice.errors > 0`. Those are not the same
+      // condition: a volume can answer a listing *successfully* while reporting
+      // that it did not cover the collection, and then `errors` is 0. Such a pass
+      // had its absence-based decisions deferred, so it must also record itself
+      // dirty — otherwise `recordRun` is handed `ok`, the owner sees a clean tick,
+      // and `pass_started_at` is cleared as though the tree had been verified.
+      const dirty = outcome.errors > 0 || slice.errors > 0 || !slice.complete;
       const status: RunResult['status'] = dirty ? (outcome.applied > 0 ? 'partial' : 'failed') : 'ok';
       await this.replicationDAO.recordRun(
         this.row.replication_id,

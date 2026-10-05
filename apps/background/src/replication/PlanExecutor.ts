@@ -239,6 +239,11 @@ class PlanExecutor {
    * - present on exactly one -> **record nothing**. A half-applied transfer must
    *   not be remembered as agreement, or the next pass would see "unchanged" and
    *   never finish the job.
+   *
+   * `forget` is the only irreversible act here, so it is also the only one that
+   * requires *positive* evidence of absence from both sides. A read that failed,
+   * and a listing that admits it did not cover the path, are both "unknown" and
+   * neither may be counted as an absence.
    */
   private async recordBase(touched: ReadonlySet<string>): Promise<{ errors: number; firstError: string | null }> {
     const { localStub, remote, replicationId } = this.options;
@@ -249,12 +254,18 @@ class PlanExecutor {
       // Both reads degrade to `null` on failure, which lands in the "present on
       // exactly one side" case below — so an unreadable path records no base at
       // all rather than recording a wrong one.
-      const localEntry = await localStub
-        .listReplicaChildren(parentOf(path))
-        .then((entries) => entries.find((entry) => entry.path === path) ?? null)
-        .catch(() => null);
+      //
+      // `forget` is the one genuinely irreversible act in this file: it drops the
+      // evidence that a sync ever agreed on this path, and the next pass reads
+      // its absence as "deleted everywhere". So a listing that did *not* cover
+      // the parent cannot be allowed to supply the "absent locally" half of the
+      // both-sides-absent answer — an incomplete listing would forget paths it
+      // simply never looked at.
+      const local = await localStub.listReplicaChildren(parentOf(path)).catch(() => null);
+      const localListingComplete = local !== null && local.complete;
+      const localEntry = localListingComplete ? (local.entries.find((entry) => entry.path === path) ?? null) : null;
       const remoteEntry = await remote.stat(path).catch(() => null);
-      if (localEntry === null && remoteEntry === null) {
+      if (localEntry === null && remoteEntry === null && localListingComplete) {
         forget.push(path);
         continue;
       }
