@@ -3,7 +3,7 @@ import type { DofsFs, DurableSqlStorage } from '@durable-dav/dav-store';
 import type { DeadProperty } from '@durable-dav/webdav';
 import { fsPathOf, isValidInnerPath } from './DavContext';
 import { DavRepository } from './DavRepository';
-import { base64ToBytes, bytesToBase64 } from './Base64';
+import { base64ToBytes, bytesToBase64 } from '@durable-dav/shared/utils';
 
 /**
  * Username-rename transfer primitives.
