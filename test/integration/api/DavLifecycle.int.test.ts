@@ -131,6 +131,98 @@ describe('Durable-DAV lifecycle (buckets + WebDAV Class 1/2)', () => {
     expect(unlock.status).toBe(204);
   });
 
+  /**
+   * The ancestor walk had four implementations — the 423 guard, the
+   * `lockdiscovery` projection, LOCK's per-path read, and LOCK's refresh lookup.
+   * They were consolidated onto one exported walk, and this asserts the property
+   * that consolidation was for: what `lockdiscovery` *reports* and what the guard
+   * *enforces* are the same set, for a `Depth: infinity` lock on a collection.
+   *
+   * A disagreement is invisible from either side alone. The guard answers "may I
+   * write this" and the PROPFIND answers "what is locked here"; each looks
+   * correct while they name different paths, and the client sees a resource it
+   * believes is unlocked then gets a 423 on it.
+   */
+  it('an infinity lock on a collection is advertised and enforced on its children', async () => {
+    const minted = await SELF.fetch('https://example.com/user/volumes/test/photos/credentials', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: 'infinity-locker' }),
+    });
+    expect(minted.status).toBe(201);
+    const { username, password } = (await minted.json()) as { username: string; password: string };
+    const auth = basic(username, password);
+
+    // A child inside the collection, distinct from `dir/hello.txt` so an earlier
+    // test's lock cannot make this one a refresh.
+    await SELF.fetch('https://example.com/test/photos/dir/child.txt', {
+      method: 'PUT',
+      headers: { ...auth, 'Content-Type': 'text/plain' },
+      body: 'child',
+    });
+
+    const lock = await SELF.fetch('https://example.com/test/photos/dir', {
+      method: 'LOCK',
+      headers: { ...auth, Depth: 'infinity', Timeout: 'Second-60', 'Content-Type': 'application/xml' },
+      body: '<?xml version="1.0"?><lockinfo xmlns="DAV:"><lockscope><exclusive/></lockscope><locktype><write/></locktype></lockinfo>',
+    });
+    expect(lock.status).toBe(201);
+    const token = lock.headers.get('Lock-Token') ?? '';
+
+    // A second credential, so the write below is genuinely *another* client and
+    // cannot be answered by the lock holder's own token.
+    const other = await SELF.fetch('https://example.com/user/volumes/test/photos/credentials', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: 'bystander' }),
+    });
+    const { username: otherUser, password: otherPassword } = (await other.json()) as { username: string; password: string };
+    const otherAuth = basic(otherUser, otherPassword);
+
+    // What the guard enforces.
+    const blockedWrite = await SELF.fetch('https://example.com/test/photos/dir/child.txt', {
+      method: 'PUT',
+      headers: { ...otherAuth, 'Content-Type': 'text/plain' },
+      body: 'overwritten',
+    });
+    expect(blockedWrite.status).toBe(423);
+
+    // What lockdiscovery advertises. The same child must be reported as locked —
+    // this is the assertion the two walks used to fail.
+    const propfind = await SELF.fetch('https://example.com/test/photos/dir/child.txt', {
+      method: 'PROPFIND',
+      headers: { ...otherAuth, Depth: '0', 'Content-Type': 'application/xml' },
+      body: '<?xml version="1.0"?><propfind xmlns="DAV:"><prop><lockdiscovery/></prop></propfind>',
+    });
+    expect(propfind.status).toBe(207);
+    const xml = await propfind.text();
+    expect(xml).toContain('<activelock>');
+    // The inherited lock's root is the collection, not the child — the answer a
+    // depth-0-only walk would have got wrong by reporting nothing at all.
+    expect(xml).toContain('<depth>infinity</depth>');
+
+    // A refresh of the collection by its holder must not be refused by the
+    // lock it already holds, and must keep the infinity depth (§9.10.2). The
+    // `If` header carries the same `urn:uuid:` value the `Lock-Token` header
+    // returned, brackets included.
+    const refresh = await SELF.fetch('https://example.com/test/photos/dir', {
+      method: 'LOCK',
+      headers: { ...auth, Depth: '0', If: `(${token})`, 'Content-Type': 'application/xml' },
+    });
+    expect(refresh.status).toBe(200);
+    expect(await refresh.text()).toContain('<depth>infinity</depth>');
+
+    expect((await SELF.fetch('https://example.com/test/photos/dir', { method: 'UNLOCK', headers: { ...auth, 'Lock-Token': token } })).status).toBe(204);
+
+    // Released: the same write that was refused now succeeds, so the 423 above
+    // came from this lock and not from something else about the path.
+    expect((await SELF.fetch('https://example.com/test/photos/dir/child.txt', {
+      method: 'PUT',
+      headers: { ...otherAuth, 'Content-Type': 'text/plain' },
+      body: 'overwritten',
+    })).status).toBe(204);
+  });
+
   it('PATCH visibility and DELETE bucket (danger zone)', async () => {
     const patched = await SELF.fetch('https://example.com/user/volumes/test/photos', {
       method: 'PATCH',

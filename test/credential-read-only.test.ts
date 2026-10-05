@@ -9,7 +9,7 @@ import type { D1Queryable } from '@durable-dav/backend-data/utils';
 import { DavCredentialUtil } from '@durable-dav/shared/utils';
 import type { DavVolumeRow } from '@durable-dav/backend-data/dao';
 import { davAuthForVolume } from '../apps/api/src/middleware/DavAuth';
-import { davErrorResponse } from '@durable-dav/webdav';
+import { davErrorResponse, requiresWrite } from '@durable-dav/webdav';
 
 type TestEnv = { Bindings: Env; Variables: { AuthenticatedUserEmailAddress: string } };
 type TestApp = Hono<TestEnv>;
@@ -19,12 +19,13 @@ const USERNAME = 'quiet-otter';
 const PASSWORD = 'ddav_probe_password';
 
 /**
-Methods the front door treats as writes (`DavRoutes.needsWrite`). `davAuthForVolume`
-is called with that boolean, so the fake app derives it the same way the real
-route does rather than the test hand-picking.
+`davAuthForVolume` is called with the front door's write predicate, so the fake
+app imports it rather than keeping a copy. A hand-written list here could drift
+from the real route and leave these tests passing against a gate that no longer
+holds.
 */
 function isWrite(method: string): boolean {
-  return !['GET', 'HEAD', 'OPTIONS', 'PROPFIND'].includes(method);
+  return requiresWrite(method);
 }
 
 /**

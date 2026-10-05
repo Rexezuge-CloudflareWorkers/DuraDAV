@@ -1,6 +1,6 @@
-import { getDeadProperties, upsertNode } from '@durable-dav/dav-store';
+import { getDeadProperties, upsertDeadProperty, upsertNode } from '@durable-dav/dav-store';
 import type { DofsFs, DurableSqlStorage } from '@durable-dav/dav-store';
-import type { DeadProperty } from '@durable-dav/webdav';
+import { getParentPath, type DeadProperty } from '@durable-dav/webdav';
 import { fsPathOf, isValidInnerPath } from './DavContext';
 import { DavRepository } from './DavRepository';
 import { base64ToBytes, bytesToBase64 } from '@durable-dav/shared/utils';
@@ -100,7 +100,7 @@ class VolumeTransfer {
       throw new Error(`writeVolumeEntry: invalid volume entry path ${JSON.stringify(entry.path)}`);
     }
     const repo = new DavRepository(this.dofs, this.sql);
-    const parent = entry.path.split('/').slice(0, -1).join('/');
+    const parent = getParentPath(entry.path);
     if (parent !== '') {
       try {
         this.dofs.mkdir(fsPathOf(parent), { recursive: true });
@@ -133,14 +133,7 @@ class VolumeTransfer {
     const props = entry.props ?? [];
     for (const prop of props) {
       try {
-        this.sql.exec(
-          `INSERT INTO dav_props (path, namespace_uri, local_name, prefix, value_xml) VALUES (?, ?, ?, ?, ?) ON CONFLICT(path, namespace_uri, local_name) DO UPDATE SET prefix=excluded.prefix, value_xml=excluded.value_xml`,
-          entry.path,
-          prop.namespaceURI ?? '',
-          prop.localName ?? '',
-          prop.prefix ?? null,
-          prop.valueXml ?? '',
-        );
+        upsertDeadProperty(this.sql, entry.path, prop);
       } catch {
         // Dead-prop copy is best-effort; the file bytes are already durable.
       }

@@ -8,7 +8,7 @@
  * lost-update protection these headers exist for, and Finder/davfs2's
  * create-only `PUT` (`If-None-Match: *`) always succeeded.
  */
-import { getIfHeaderEtags } from '@durable-dav/webdav';
+import { getIfHeaderEtags, weakEtagValue } from '@durable-dav/webdav';
 
 class DavConditionalGuard {
   /**
@@ -92,20 +92,18 @@ function preconditionFailed(header: string): Response {
 }
 
 /**
-Strip surrounding whitespace and a leading `W/` weak-validator prefix.
-*/
-function normalizeEtag(value: string): string {
-  return value.trim().replace(/^W\//, '');
-}
-
-/**
 Compare an `If-Match`/`If-None-Match` list against the current ETag.
+
+Both sides go through `weakEtagValue`: RFC 9110 §13.1.2 defines `If-None-Match`
+as a weak comparison, so a `W/"x"` header must match a stored `"x"`. The
+validator we mint is already unquoted, which is why the quotes are left alone
+here — see `weakEtagValue`.
 */
 function matchesEtagList(headerValue: string, etag: string): boolean {
-  const target = normalizeEtag(etag);
+  const target = weakEtagValue(etag);
   return headerValue
     .split(',')
-    .map((part) => normalizeEtag(part))
+    .map((part) => weakEtagValue(part))
     .includes(target);
 }
 

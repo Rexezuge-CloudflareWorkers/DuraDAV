@@ -4,7 +4,7 @@ import { BaseRoute } from '@/endpoints/IBaseRoute';
 import type { ApiApp, ApiContext } from '@/types/ApiContext';
 import { davAuthForVolume } from '@/middleware/DavAuth';
 import { getVolumeStub } from '../doStubs';
-import { DAV_CLASS, SUPPORT_METHODS, applyCors, stripSlashes } from '@durable-dav/webdav';
+import { DAV_CLASS, SUPPORT_METHODS, allowsBody, applyCors, requiresWrite, stripSlashes } from '@durable-dav/webdav';
 import { contentTtls, invalidateVolumeCaches, invalidatesReadCache } from './DavReadCache';
 import { davHeaders, serveGet, servePropfind } from './DavReadServing';
 import { resolveDestination } from './davDestination';
@@ -26,10 +26,6 @@ Resolve the content-cache TTLs from `DAV_CACHE_TTL_SECONDS` (per request).
 */
 function ttlsOf(c: DavContext): { prop: number; file: number } {
   return contentTtls(AppConfiguration.fromEnv(c.env).getDavCacheTtlSeconds());
-}
-
-function needsWrite(method: string): boolean {
-  return !['GET', 'HEAD', 'OPTIONS', 'PROPFIND'].includes(method);
 }
 
 /**
@@ -70,7 +66,7 @@ async function handleDav(c: DavContext, owner: string, volume: string, inner: st
       }),
     );
   }
-  const auth = await davAuthForVolume(c, owner, volume, needsWrite(method));
+  const auth = await davAuthForVolume(c, owner, volume, requiresWrite(method));
   if (auth instanceof Response) return cors(c, auth);
   const stub = getVolumeStub(c.env, auth.owner, auth.volume);
   const base = `/${auth.owner}/${auth.volume}`;
@@ -82,7 +78,7 @@ async function handleDav(c: DavContext, owner: string, volume: string, inner: st
   if (method === 'PROPFIND') {
     return cors(c, await servePropfind({ c, stub, auth, base, inner, cache, ttls }));
   }
-  const hasBody = !['GET', 'HEAD', 'OPTIONS'].includes(method);
+  const hasBody = allowsBody(method);
   const headers = davHeaders(c, auth, base, inner);
   // `Destination` is canonicalised to the `/owner/volume` form before the DO
   // sees it, so the DO only ever has to understand one shape (see

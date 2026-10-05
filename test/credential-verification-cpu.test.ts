@@ -8,6 +8,7 @@ import { DavCredentialDAO, DavVolumeDAO } from '@durable-dav/backend-data/dao';
 import type { D1Queryable } from '@durable-dav/backend-data/utils';
 import { DatabaseError } from '@durable-dav/backend-errors';
 import { DavCredentialUtil, passwordFingerprint } from '@durable-dav/shared/utils';
+import { requiresWrite } from '@durable-dav/webdav';
 import type { DavVolumeRow } from '@durable-dav/backend-data/dao';
 import { davAuthForVolume } from '../apps/api/src/middleware/DavAuth';
 import {
@@ -39,8 +40,13 @@ const PASSWORD = 'ddav_probe_password';
  * derivation rare instead: a verified password is not re-derived, and a wrong
  * or rotated one always is.
  */
+/**
+The front door's own predicate, imported rather than re-listed: these tests
+assert that a write costs a derivation, so they must ask the same question the
+route asks.
+*/
 function isWrite(method: string): boolean {
-  return !['GET', 'HEAD', 'OPTIONS', 'PROPFIND'].includes(method);
+  return requiresWrite(method);
 }
 
 function volumeRow(overrides: Partial<DavVolumeRow> = {}): DavVolumeRow {
