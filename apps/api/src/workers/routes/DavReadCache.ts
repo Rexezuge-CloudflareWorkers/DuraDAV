@@ -1,6 +1,6 @@
 import type { KvCache } from '@durable-dav/backend-runtime/kv';
 import { digest128, invalidateDavVolumeCaches } from '@durable-dav/backend-runtime/kv';
-import { normalizeVolumeKey } from '@durable-dav/webdav';
+import { normalizeVolumeKey, weakEtagValue } from '@durable-dav/webdav';
 import {  bytesToBase64 } from '@durable-dav/shared/utils';
 
 // KV-backed read cache for DAV RPCs (Git `RepoReadCache` pattern).
@@ -79,10 +79,30 @@ function cacheKeyForVolume(owner: string, volume: string): string {
   return normalizeVolumeKey(owner, volume);
 }
 
+/**
+Is this a conditional request the cached entry already satisfies?
+
+The PROPFIND validator is weak (`W/"prop-…"`, see `etagForPropfind`), and
+RFC 9110 §13.1.2 makes `If-None-Match` a *weak* comparison — so the `W/` marker
+is compared away on both sides. Both operands are unquoted (we minted and
+re-emitted them), which is why `weakEtagValue` rather than `etagBody` is the
+right normalizer here.
+
+This was a raw string compare. It agreed with the bytes we minted, so it was
+not reporting a wrong answer — but a client is entitled to send the strong form
+of a weak validator, and every such request missed the cache and was answered
+with a full `207`. `*` stays a literal: it is not a validator and must not be
+compared as one.
+*/
 function isFresh(request: Request, etag: string | null): boolean {
   if (!etag) return false;
   const incoming = request.headers.get('If-None-Match');
-  return incoming ? incoming.split(',').some((part) => part.trim() === etag || part.trim() === '*') : false;
+  if (!incoming) return false;
+  const target = weakEtagValue(etag);
+  return incoming.split(',').some((part) => {
+    const candidate = part.trim();
+    return candidate === '*' || weakEtagValue(candidate) === target;
+  });
 }
 
 /**

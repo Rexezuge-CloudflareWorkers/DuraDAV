@@ -1,5 +1,5 @@
 import { Tokens } from '@durable-dav/backend-services/composition';
-import { SUPPORT_METHODS, DAV_CLASS, stripSlashes } from '@durable-dav/webdav';
+import { SUPPORT_METHODS, DAV_CLASS, allowsBody, stripSlashes } from '@durable-dav/webdav';
 import { readDavHrefPrefixMode } from '@durable-dav/shared/constants';
 import type { ApiApp, ApiContext } from '@/types/ApiContext';
 import { getVolumeStub } from '../doStubs';
@@ -60,7 +60,7 @@ class BrowserVolumeRoute extends VolumeScopedRoute {
     // forwarded URL so they cannot reach the DAV surface as a `DAV:` href.
     const pageParams = readPageParams(url);
     const forwardUrl = pageParams === null ? url : stripPageParams(url);
-    const hasBody = !['GET', 'HEAD', 'OPTIONS'].includes(method);
+    const hasBody = allowsBody(method);
     const destination = resolveDestination(c.req.raw.headers.get('Destination'), c.req.url, davBase, hrefPrefixMode);
     if (c.req.raw.headers.has('Destination') && !destination.ok) {
       // §10.3: a destination on another server cannot be satisfied. Any other

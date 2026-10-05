@@ -2,6 +2,51 @@ const DAV_CLASS = '1, 2';
 
 const SUPPORT_METHODS = ['OPTIONS', 'PROPFIND', 'PROPPATCH', 'MKCOL', 'GET', 'HEAD', 'PUT', 'DELETE', 'COPY', 'MOVE', 'LOCK', 'UNLOCK'];
 
+/**
+ * Methods the DAV surface answers without changing the resource.
+ *
+ * This is the security-relevant list: `DavAuth.davAuthForVolume` takes the
+ * negation as `needWrite` and refuses a write from a read-only credential, so
+ * every caller must ask this module rather than keep its own copy. Two test
+ * suites used to re-derive it, which meant a test could pass while the front
+ * door it claimed to cover had already changed.
+ *
+ * Deliberately *not* the same set as `DAV_SAFE_METHODS` below: `PROPFIND` writes
+ * nothing and `LOCK` writes a lock, so the two questions have two answers.
+ */
+const READ_METHODS = ['GET', 'HEAD', 'OPTIONS', 'PROPFIND'] as const;
+
+/**
+ * Methods that carry no request body.
+ *
+ * `PROPFIND` is absent — it is a body-carrying read. The front door forwards a
+ * body and `duplex: 'half'` only when this says so, and streaming a body into a
+ * request the runtime will not read is how a forwarded `PUT` loses its bytes.
+ */
+const DAV_SAFE_METHODS = ['GET', 'HEAD', 'OPTIONS'] as const;
+
+/**
+ * Does this method change the resource, and therefore require write authority?
+ *
+ * Used by the front door's read-only-credential gate and by every test that
+ * exercises it.
+ */
+function requiresWrite(method: string): boolean {
+  return !READ_METHODS.includes(method as (typeof READ_METHODS)[number]);
+}
+
+/**
+ * May this method carry a request body?
+ *
+ * A different question from {@link requiresWrite}, answered from a different
+ * list: `PROPFIND` writes nothing and needs a body, while `GET` writes nothing
+ * and must not have one. Collapsing the two is the mistake this pair exists to
+ * prevent.
+ */
+function allowsBody(method: string): boolean {
+  return !DAV_SAFE_METHODS.includes(method as (typeof DAV_SAFE_METHODS)[number]);
+}
+
 const CORS_ALLOW_HEADERS = [
   'authorization',
   'content-type',
@@ -115,4 +160,15 @@ function davErrorResponse(status: number, condition?: string, headers: HeadersIn
   return new Response(body, { status, headers: responseHeaders });
 }
 
-export { DAV_CLASS, SUPPORT_METHODS, applyCors, createdResponse, allowedOrigins, davErrorResponse };
+export {
+  DAV_CLASS,
+  SUPPORT_METHODS,
+  READ_METHODS,
+  DAV_SAFE_METHODS,
+  requiresWrite,
+  allowsBody,
+  applyCors,
+  createdResponse,
+  allowedOrigins,
+  davErrorResponse,
+};

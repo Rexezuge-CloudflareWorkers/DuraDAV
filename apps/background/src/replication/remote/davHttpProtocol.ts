@@ -1,4 +1,5 @@
 import { RemoteUrlRejectedError } from '@durable-dav/shared/net';
+import { stripSlashes as trimSlashes } from '@durable-dav/webdav';
 
 /**
  * URL and body helpers for the WebDAV transport.
@@ -32,21 +33,6 @@ const MAX_REMOVE_DEPTH = 64;
  * not an error.
  */
 const DELETE_SUCCESS: ReadonlySet<number> = new Set([200, 204, 404]);
-
-/**
- * Strip leading and trailing slashes in one pass.
- *
- * Two chained `replace` calls were the obvious spelling, but the pair of unbounded
- * quantifiers is what a static analyser reads as super-linear backtracking. One pass
- * has neither problem and is one operation instead of two.
- */
-function trimSlashes(value: string): string {
-  let start = 0;
-  let end = value.length;
-  while (start < end && value[start] === '/') start += 1;
-  while (end > start && value[end - 1] === '/') end -= 1;
-  return value.slice(start, end);
-}
 
 /**
  * Join the configured base and subdirectory into a URL.
@@ -125,9 +111,11 @@ export {
   propfindBody,
   classifyStatus,
   basicAuthValue,
-  trimSlashes,
+  
   DELETE_FANOUT,
   MAX_REMOVE_DEPTH,
   DELETE_SUCCESS,
 };
 export type { DavHttpFetch, DavAuthHeader };
+
+export {stripSlashes as trimSlashes} from '@durable-dav/webdav';

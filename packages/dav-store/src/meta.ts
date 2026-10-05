@@ -69,6 +69,31 @@ function nowMs(): number {
 }
 
 /**
+ * Write one dead property, replacing any existing value for that name.
+ *
+ * The `dav_props` upsert existed in four places — `PropMethods`, `DavRepository`,
+ * `VolumeTransfer`, and `replicaOperations` — as the same statement with the
+ * same `?? ''`/`?? null` normalizations. `meta.ts` already owns every other
+ * `dav_props` statement (`getDeadProperties` above, the cascades below), so this
+ * is where it belongs; four copies is four chances to disagree about what a
+ * missing namespace or prefix means, and a disagreement here is a dead property
+ * that PROPFIND cannot find afterwards.
+ *
+ * `namespaceURI` and `localName` default to `''` rather than being rejected,
+ * matching what the four callers each did on their own.
+ */
+function upsertDeadProperty(sql: DurableSqlStorage, path: string, property: DeadProperty): void {
+  sql.exec(
+    `INSERT INTO dav_props (path, namespace_uri, local_name, prefix, value_xml) VALUES (?, ?, ?, ?, ?) ON CONFLICT(path, namespace_uri, local_name) DO UPDATE SET prefix=excluded.prefix, value_xml=excluded.value_xml`,
+    path,
+    property.namespaceURI ?? '',
+    property.localName ?? '',
+    property.prefix ?? null,
+    property.valueXml ?? '',
+  );
+}
+
+/**
  * Did this statement fail only because the column is already there?
  *
  * The alternative — ignoring the error — would also swallow a genuinely broken
@@ -230,5 +255,5 @@ function getDeadProperties(sql: DurableSqlStorage, path: string): DeadProperty[]
   }));
 }
 
-export { ensureDavSchema, upsertNode, deleteNodeCascade, renameNodeCascade, getDeadProperties, subtreePredicate };
+export { ensureDavSchema, upsertNode, upsertDeadProperty, deleteNodeCascade, renameNodeCascade, getDeadProperties, subtreePredicate };
 export type { DurableSqlStorage };

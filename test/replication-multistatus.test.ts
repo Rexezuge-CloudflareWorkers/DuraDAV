@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { parseMultiStatus, decodePathname, normalizeEtag, isSuccessStatus } from '@durable-dav/webdav';
+import { parseMultiStatus, decodePathname, etagBody, isSuccessStatus } from '@durable-dav/webdav';
 
 /**
  * The 207 response parser, against bodies shaped like real servers'.
@@ -160,12 +160,15 @@ describe('helpers', () => {
     expect(decodePathname('/a%ZZ/b')).toBe('/a%ZZ/b');
   });
 
-  it('normalizeEtag strips quotes and rejects empties', () => {
-    expect(normalizeEtag('"abc"')).toBe('abc');
-    expect(normalizeEtag('abc')).toBe('abc');
-    expect(normalizeEtag('""')).toBeNull();
-    expect(normalizeEtag(' '.repeat(3))).toBeNull();
-    expect(normalizeEtag(null)).toBeNull();
+  it('etagBody strips quotes, keeps weakness, and rejects empties', () => {
+    expect(etagBody('"abc"')).toBe('abc');
+    expect(etagBody('abc')).toBe('abc');
+    // Weakness survives: the planner reads a strong match as byte-identity, so
+    // a weak ETag that lost its marker would be over-trusted.
+    expect(etagBody('W/"abc"')).toBe('W/abc');
+    expect(etagBody('""')).toBeNull();
+    expect(etagBody(' '.repeat(3))).toBeNull();
+    expect(etagBody(null)).toBeNull();
   });
 
   it('isSuccessStatus accepts 2xx and treats an omitted status as success', () => {

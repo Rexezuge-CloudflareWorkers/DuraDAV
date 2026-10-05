@@ -18,11 +18,18 @@ class DavLockGuard {
    * literal was one segment short: a path of exactly 256 segments filled the
    * cap with depths 256→1 and stopped *before* pushing the volume root `''`,
    * so a `Depth: infinity` lock on the root silently stopped applying one level
-   * below maximum depth. `DavRepository.applicableLocks` had the identical cap,
-   * which is why `lockdiscovery` agreed with the guard and the bug was
-   * invisible from either side.
+   * below maximum depth.
+   *
+   * Exported rather than private, because **three** callers need this exact set
+   * and each had reimplemented it: the guard itself, the `lockdiscovery`
+   * projection in `DavRepository`, and LOCK's refresh lookup in `LockMethods`.
+   * `DavRepository`'s copy carried a comment claiming it used the guard's set —
+   * a claim that held only because the two implementations happened to agree.
+   * They had once differed by one segment, and because both sides were equally
+   * wrong nothing reported the disagreement. A comment asserting equality is not
+   * a mechanism for it.
    */
-  private static ancestorsOf(innerPath: string): string[] {
+  static ancestorsOf(innerPath: string): string[] {
     const out: string[] = [];
     let cur = innerPath;
     for (;;) {

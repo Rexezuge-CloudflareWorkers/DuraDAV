@@ -1,8 +1,10 @@
 /* eslint-disable @typescript-eslint/no-base-to-string -- DO SQLite rows are primitives (TEXT/INTEGER); Record<string, unknown> trips the object-stringification guard. */
-import { deleteNodeCascade, getDeadProperties, renameNodeCascade, upsertNode } from '@durable-dav/dav-store';
+import { deleteNodeCascade, getDeadProperties, renameNodeCascade, upsertDeadProperty, upsertNode } from '@durable-dav/dav-store';
 import type { DirEntry as DofsChildEntry, DofsFs, DurableSqlStorage } from '@durable-dav/dav-store';
-import { normalizeLockDetails, type DavNodeInfo, type LockDetails } from '@durable-dav/webdav';
-import { hrefOf, MAX_PATH_DEPTH } from './DavContext';
+import type { DavNodeInfo, LockDetails } from '@durable-dav/webdav';
+import { hrefOf } from './DavContext';
+import { DavLockGuard } from './DavLockGuard';
+import { lockDetailsFromRow } from './lockRows';
 import { DavReadPolicy, type StatResult } from './davReadPolicy';
 
 // Repository over dofs + DO SQLite (why: the DO previously inlined every
@@ -86,22 +88,16 @@ class DavRepository {
    * infinity-locked collection reported no lock — while `DavLockGuard` *did*
    * enforce it for writes. A client therefore saw an unlocked resource and got
    * `423` on write, which is precisely the confusion `lockdiscovery` exists to
-   * prevent. Uses the same ancestor set as the guard.
+   * prevent.
    */
   private applicableLocks(innerPath: string, hrefBase: string): LockDetails[] {
-    // Same ancestor set, and the same `MAX_PATH_DEPTH` bound, as
-    // `DavLockGuard.ancestorsOf` — see that method for why the cap has to leave
-    // room for the volume root. When the two disagreed, `lockdiscovery` and the
-    // guard each reported a different answer for the same resource, which is
-    // the one thing a lock-discovery property exists to prevent.
-    const ancestors: string[] = [];
-    let cur = innerPath;
-    for (;;) {
-      ancestors.push(cur);
-      if (cur === '' || ancestors.length > MAX_PATH_DEPTH) break;
-      const slash = cur.lastIndexOf('/');
-      cur = slash === -1 ? '' : cur.slice(0, slash);
-    }
+    // The guard's ancestor set, called rather than re-walked. This method had its
+    // own `lastIndexOf` loop with its own `MAX_PATH_DEPTH` comparison, under a
+    // comment stating it was the same walk the guard used — which is precisely the
+    // claim that cannot be trusted, because when the two implementations
+    // disagreed by one segment `lockdiscovery` and the 423 guard each reported a
+    // different answer for the same resource and neither said so.
+    const ancestors = DavLockGuard.ancestorsOf(innerPath);
     const placeholders = ancestors.map(() => '?').join(', ');
     const rows = this.sql
       .exec(
@@ -111,22 +107,18 @@ class DavRepository {
       )
       .toArray();
     return rows.flatMap((row) => {
-      const token = String(row['token'] ?? '');
-      if (!token) return [];
+      // A row with no token is not a lock; `normalizeLockDetails` would accept
+      // the empty string as one, so this is checked before mapping.
+      if (String(row['token'] ?? '') === '') return [];
       const lockPath = String(row['path'] ?? '');
-      const depth = row['depth'] === 'infinity' ? 'infinity' : '0';
       // A depth-0 ancestor lock does not reach this resource.
-      if (depth !== 'infinity' && lockPath !== innerPath) return [];
-      const normalized = normalizeLockDetails({
-        token,
-        owner: row['owner'] == null ? undefined : String(row['owner']),
-        scope: row['scope'] === 'shared' ? 'shared' : 'exclusive',
-        depth,
-        timeout: String(row['timeout'] ?? ''),
-        expiresAt: Number(row['expiresAt'] ?? 0),
-        root: hrefOf(hrefBase, lockPath, true),
-      });
-      return normalized ? [normalized] : [];
+      if (lockPath !== innerPath && row['depth'] !== 'infinity') return [];
+      // `root` is recomputed from the bucket's *current* href base rather than
+      // read from the column, so a bucket that switched prefix mode still
+      // advertises lock hrefs in the shape it is currently emitting. That is why
+      // this call site passes a root instead of using the stored one.
+      const details = lockDetailsFromRow(row, hrefOf(hrefBase, lockPath, true));
+      return details ? [details] : [];
     });
   }
 
@@ -295,14 +287,12 @@ class DavRepository {
       );
       const props = this.sql.exec(`SELECT namespace_uri, local_name, prefix, value_xml FROM dav_props WHERE path = ?`, from).toArray();
       for (const p of props) {
-        this.sql.exec(
-          `INSERT INTO dav_props (path, namespace_uri, local_name, prefix, value_xml) VALUES (?, ?, ?, ?, ?) ON CONFLICT(path, namespace_uri, local_name) DO UPDATE SET prefix=excluded.prefix, value_xml=excluded.value_xml`,
-          to,
-          String(p['namespace_uri'] ?? ''),
-          String(p['local_name'] ?? ''),
-          p['prefix'] == null ? null : String(p['prefix']),
-          String(p['value_xml'] ?? ''),
-        );
+        upsertDeadProperty(this.sql, to, {
+          namespaceURI: String(p['namespace_uri'] ?? ''),
+          localName: String(p['local_name'] ?? ''),
+          prefix: p['prefix'] == null ? null : String(p['prefix']),
+          valueXml: String(p['value_xml'] ?? ''),
+        });
       }
       // Locks are NOT copied (per RFC 4918 §9.8).
     } catch {

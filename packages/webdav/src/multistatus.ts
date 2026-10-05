@@ -15,6 +15,7 @@
 
 import type { Element as XmlElement } from '@xmldom/xmldom';
 import { getChildElements, parseXmlDocument } from './xml';
+import { etagBody } from './etag';
 
 /**
  * One resource as reported by a `PROPFIND`.
@@ -98,24 +99,7 @@ function hasChildElement(element: XmlElement, name: string): boolean {
   return getChildElements(element).some((child) => (child.localName ?? '').toLowerCase() === wanted);
 }
 
-/**
- * Strip one layer of ETag quoting.
- *
- * Weak validators keep their `W/` prefix on purpose: dropping it would make a
- * weak ETag compare equal to a strong one, and the planner treats a strong
- * match as proof the two sides hold the same bytes.
- */
-function normalizeEtag(raw: string | null): string | null {
-  if (raw === null) return null;
-  const trimmed = raw.trim();
-  if (trimmed === '') return null;
-  const weak = /^W\//i.test(trimmed);
-  const body = weak ? trimmed.slice(2) : trimmed;
-  const unquoted = body.startsWith('"') && body.endsWith('"') && body.length >= 2 ? body.slice(1, -1) : body;
-  const value = unquoted.trim();
-  if (value === '') return null;
-  return weak ? `W/${value}` : value;
-}
+
 
 function parseSize(raw: string | null): number | null {
   if (raw === null) return null;
@@ -184,7 +168,7 @@ const PROPERTY_READERS: Readonly<Record<string, (property: XmlElement, into: Par
     into.isCollection = hasChildElement(property, 'collection');
   },
   getetag: (property, into) => {
-    into.etag = normalizeEtag(textOf(property));
+    into.etag = etagBody(textOf(property));
   },
   getlastmodified: (property, into) => {
     into.lastModified = parseHttpDate(textOf(property));
@@ -277,5 +261,5 @@ function parseMultiStatus(body: string, options: MultiStatusOptions): RemoteReso
     .filter((resource): resource is RemoteResource => resource !== null);
 }
 
-export { parseMultiStatus, normalizeEtag, isSuccessStatus, decodePathname };
+export { parseMultiStatus, isSuccessStatus, decodePathname };
 export type { RemoteResource, MultiStatusOptions };

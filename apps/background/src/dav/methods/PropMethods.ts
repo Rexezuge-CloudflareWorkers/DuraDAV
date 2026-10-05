@@ -1,4 +1,5 @@
 import type { DurableSqlStorage } from '@durable-dav/dav-store';
+import { upsertDeadProperty } from '@durable-dav/dav-store';
 import {
   MAX_XML_BODY_BYTES,
   escapeXml,
@@ -8,6 +9,7 @@ import {
   parseProppatchRequest,
   readCappedText,
   renderEmptyPropertyElement,
+  renderPropstat,
   type DeadProperty,
 } from '@durable-dav/webdav';
 
@@ -130,14 +132,7 @@ async function handleProppatch(
   if (!hasProtectedFailures) {
     for (const p of okSets) {
       try {
-        sql.exec(
-          `INSERT INTO dav_props (path, namespace_uri, local_name, prefix, value_xml) VALUES (?, ?, ?, ?, ?) ON CONFLICT(path, namespace_uri, local_name) DO UPDATE SET prefix=excluded.prefix, value_xml=excluded.value_xml`,
-          innerPath,
-          p.namespaceURI,
-          p.localName,
-          p.prefix,
-          p.valueXml,
-        );
+        upsertDeadProperty(sql, innerPath, p);
         appliedSets.push(p);
       } catch (error) {
         erroredSets.push(p);
@@ -171,7 +166,9 @@ async function handleProppatch(
   for (const p of erroredRemoves) append(p, dependencyStatus);
   let xml = `<?xml version="1.0" encoding="utf-8"?>\n<multistatus xmlns="DAV:">\n<response>\n<href>${escapeXml(hrefOf(bases.hrefBase, innerPath, node?.isCollection ?? false))}</href>`;
   for (const [status, props] of propstats) {
-    xml += `\n<propstat>\n<prop>\n${props.join('\n')}\n</prop>\n<status>${status}</status>\n</propstat>`;
+    // Through the shared renderer: this block was byte-identical to
+    // `xml.ts`'s own `<propstat>`, so a fix to one was not a fix to the other.
+    xml += renderPropstat(status, props);
   }
   xml += '\n</response>\n</multistatus>';
   return new Response(xml, { status: 207, headers: { 'Content-Type': 'application/xml; charset=utf-8' } });

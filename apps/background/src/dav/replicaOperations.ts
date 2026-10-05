@@ -1,5 +1,6 @@
-import { deleteNodeCascade, getDeadProperties, upsertNode } from '@durable-dav/dav-store';
+import { deleteNodeCascade, getDeadProperties, upsertDeadProperty, upsertNode } from '@durable-dav/dav-store';
 import type { DofsFs, DurableSqlStorage } from '@durable-dav/dav-store';
+import { getParentPath } from '@durable-dav/webdav';
 import { fsPathOf, isValidInnerPath } from './DavContext';
 import { DavRepository } from './DavRepository';
 
@@ -73,7 +74,7 @@ function describe(repo: DavRepository, path: string): ReplicaEntry | null {
  */
 function mkdir(dofs: DofsFs, repo: DavRepository, path: string): void {
   if (path === '' || !isValidInnerPath(path)) throw new Error(`replication mkdir: invalid path ${JSON.stringify(path)}`);
-  const parent = path.split('/').slice(0, -1).join('/');
+  const parent = getParentPath(path);
   if (parent !== '') {
     try {
       dofs.mkdir(fsPathOf(parent), { recursive: true });
@@ -103,7 +104,7 @@ function mkdir(dofs: DofsFs, repo: DavRepository, path: string): void {
  */
 async function write(dofs: DofsFs, repo: DavRepository, path: string, contentType: string | null, data: ReadableStream<Uint8Array> | Uint8Array): Promise<void> {
   if (path === '' || !isValidInnerPath(path)) throw new Error(`replication write: invalid path ${JSON.stringify(path)}`);
-  const parent = path.split('/').slice(0, -1).join('/');
+  const parent = getParentPath(path);
   if (parent !== '') mkdir(dofs, repo, parent);
   await dofs.writeFile(fsPathOf(path), data as Parameters<DofsFs['writeFile']>[1], {});
   const now = Date.now();
@@ -165,19 +166,12 @@ function copy(dofs: DofsFs, sql: DurableSqlStorage, repo: DavRepository, from: s
     // Dead properties follow the resource, same as `VolumeTransfer`.
     for (const prop of getDeadProperties(sql, from)) {
       upsertNode(sql, to, { isCollection: true });
-      sql.exec(
-        `INSERT INTO dav_props (path, namespace_uri, local_name, prefix, value_xml) VALUES (?, ?, ?, ?, ?) ON CONFLICT(path, namespace_uri, local_name) DO UPDATE SET prefix=excluded.prefix, value_xml=excluded.value_xml`,
-        to,
-        prop.namespaceURI ?? '',
-        prop.localName ?? '',
-        prop.prefix ?? null,
-        prop.valueXml ?? '',
-      );
+      upsertDeadProperty(sql, to, prop);
     }
     return;
   }
   const bytes = new Uint8Array(dofs.read(fsPathOf(from), {}).slice(0));
-  mkdir(dofs, repo, to.split('/').slice(0, -1).join('/'));
+  mkdir(dofs, repo, getParentPath(to));
   void dofs.writeFile(fsPathOf(to), bytes.slice().buffer, {});
   const now = Date.now();
   repo.upsertFileNode(to, meta.contentType ?? 'application/octet-stream', `"${bytes.byteLength.toString(16)}-${now.toString(16)}"`, now);

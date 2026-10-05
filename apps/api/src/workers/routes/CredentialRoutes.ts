@@ -1,6 +1,7 @@
 import { Tokens } from '@durable-dav/backend-services/composition';
 import { BaseRoute } from '@/endpoints/IBaseRoute';
 import type { ApiApp, ApiContext } from '@/types/ApiContext';
+import { toCreatedCredentialJson, toCredentialJson } from './credentialProjection';
 import { VolumeScopedRoute } from './VolumeScopedRoute';
 import type { VolumeRequestContext } from './VolumeScopedRoute';
 
@@ -9,19 +10,9 @@ type App = ApiApp;
 class ListCredentials extends VolumeScopedRoute {
   protected async run(c: ApiContext, { scope, row }: VolumeRequestContext): Promise<Response> {
     const credentials = await scope.get(Tokens.VolumeCredentialService).listCredentials(row.id);
-    return c.json({
-      credentials: credentials.map((cred) => ({
-        credentialId: cred.credentialId,
-        name: cred.name,
-        username: cred.username,
-        passwordPrefix: cred.passwordPrefix,
-        passwordLastFour: cred.passwordLastFour,
-        createdAt: cred.createdAt,
-        expiresAt: cred.expiresAt,
-        lastUsedAt: cred.lastUsedAt,
-        readOnly: cred.readOnly,
-      })),
-    });
+    // Through the projection, so the listing cannot gain a field by editing a
+    // map literal here — see `credentialProjection`.
+    return c.json({ credentials: credentials.map((cred) => toCredentialJson(cred)) });
   }
 }
 
@@ -38,22 +29,9 @@ class CreateCredential extends VolumeScopedRoute {
     const created = await scope
       .get(Tokens.VolumeCredentialService)
       .createCredential(row.id, row.name, body.name, body.expiresInDays, body.readOnly);
-    return c.json(
-      {
-        credentialId: created.metadata.credentialId,
-        username: created.metadata.username,
-        // Shown exactly once — the client is expected to copy it now.
-        password: created.password,
-        name: created.metadata.name,
-        expiresAt: created.metadata.expiresAt,
-        passwordPrefix: created.metadata.passwordPrefix,
-        passwordLastFour: created.metadata.passwordLastFour,
-        // Echoed so the caller sees the flag that was actually applied — a
-        // rejected value is a 400, but a default they did not send is not.
-        readOnly: created.metadata.readOnly,
-      },
-      201,
-    );
+    // The one place a plaintext password is ever emitted, and only because this
+    // is the response that hands it to the caller who just chose it.
+    return c.json(toCreatedCredentialJson(created.metadata, created.password), 201);
   }
 }
 
@@ -78,13 +56,8 @@ class UpdateCredential extends VolumeScopedRoute {
     const updated = await scope
       .get(Tokens.VolumeCredentialService)
       .setCredentialReadOnly(row.id, c.req.param('id') ?? '', body.readOnly);
-    return c.json({
-      credentialId: updated.credentialId,
-      username: updated.username,
-      name: updated.name,
-      expiresAt: updated.expiresAt,
-      readOnly: updated.readOnly,
-    });
+    // Reuses the listing projection rather than restating a third field set.
+    return c.json(toCredentialJson(updated));
   }
 }
 
