@@ -95,7 +95,7 @@
     "MAX_CREDENTIAL_EXPIRY_DAYS": "365",
     "MAX_FILE_BYTES": "52428800",
     "DO_DEVICE_BYTES": "5368709120",
-    // Scales the `davProp` (PROPFIND) and `davFile` (small GET body) TTLs
+    // Scales the `davProp` (PROPFIND) and `davFile` (GET body) TTLs
     // together; see `contentTtls` in DavReadCache. This is garbage collection,
     // not a correctness mechanism — every content-mutating DAV method still
     // purges on write, so a long TTL cannot serve stale bytes on its own.
@@ -109,9 +109,9 @@
     // unaffected: the dashboard list has its own fixed 60s TTL.
     //
     // Ceiling to watch: the free plan also caps the namespace at 1GB, and
-    // `davFile` stores up to ~933KB per entry (700KB raw, base64), so a
-    // large enough file set can fill the namespace. `KvCache.putText` treats
-    // an over-quota write as a soft miss, so it degrades rather than erroring.
+    // `davFile` stores up to 10 MiB binary per entry, so ~100 large entries
+    // can fill the namespace. `KvCache` treats an over-quota write as a soft
+    // miss, so it degrades rather than erroring.
     "DAV_CACHE_TTL_SECONDS": "86400",
     // --- Scheduled replication -------------------------------------------
     // Every budget below exists because `CronTasksWorker` runs all tasks in one

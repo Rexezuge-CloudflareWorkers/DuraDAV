@@ -22,8 +22,8 @@
  * That allocates roughly 2× the input as UTF-16 — up to 100 MB of garbage for a
  * 50 MB payload, on top of the buffer and the result — and the variadic spread
  * approaches the engine's argument limit. `DavReadCache` runs this on the
- * `GET`/`PROPFIND` path and `aes-gcm` on every secret write, so the cost is not
- * hypothetical.
+ * `PROPFIND` path (plus the one-TTL decode of pre-binary `GET` entries) and
+ * `aes-gcm` on every secret write, so the cost is not hypothetical.
  *
  * A direct 3-byte-to-4-char table is allocation-light and has no argument limit.
  * `base64ToBytes` keeps the `atob` form: decoding allocates one binary string and
@@ -36,9 +36,9 @@ const BASE64_ALPHABET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz012
 /**
  * Encode `bytes` as standard base64 (with `=` padding).
  *
- * Not base64url: the KV cache stores these as opaque values and `aes-gcm` stores
- * them where `atob` reads them back. `CryptoUtil` has the URL-safe variant for
- * the cases that need one.
+ * Not base64url: pre-binary KV file entries stored these as opaque values and
+ * `aes-gcm` stores them where `atob` reads them back. `CryptoUtil` has the
+ * URL-safe variant for the cases that need one.
  */
 function bytesToBase64(bytes: Uint8Array): string {
   let out = '';

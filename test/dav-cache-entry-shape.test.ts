@@ -1,6 +1,5 @@
 import { describe, expect, it } from 'vitest';
 import { asFileEntry, asPropfindEntry } from '../apps/api/src/workers/routes/DavReadServing';
-import { bytesToBase64, base64ToBytes } from '../apps/api/src/workers/routes/DavReadCache';
 
 /**
  * The fail-closed boundary between "whatever is in KV" and "what we serve".
@@ -49,32 +48,39 @@ describe('asPropfindEntry', () => {
 });
 
 describe('asFileEntry', () => {
-  const b64 = bytesToBase64(new Uint8Array([104, 105]));
+  const bytes = new Uint8Array([104, 105]);
 
   it('accepts a well-formed entry', () => {
-    expect(asFileEntry({ etag: '"e"', contentType: 'text/plain', b64 })).toEqual({ etag: '"e"', contentType: 'text/plain', b64 });
+    expect(asFileEntry({ etag: '"e"', contentType: 'text/plain', bytes })).toEqual({ etag: '"e"', contentType: 'text/plain', bytes });
+  });
+
+  it('accepts an empty file, which is a legitimate zero-byte body', () => {
+    const empty = new Uint8Array(0);
+    expect(asFileEntry({ etag: '"e"', contentType: 'text/plain', bytes: empty })).toEqual({
+      etag: '"e"',
+      contentType: 'text/plain',
+      bytes: empty,
+    });
   });
 
   it('defaults a missing contentType to null rather than failing', () => {
-    expect(asFileEntry({ etag: '"e"', b64 })).toEqual({ etag: '"e"', contentType: null, b64 });
-    expect(asFileEntry({ etag: '"e"', contentType: 42, b64 })).toEqual({ etag: '"e"', contentType: null, b64 });
+    expect(asFileEntry({ etag: '"e"', bytes })).toEqual({ etag: '"e"', contentType: null, bytes });
+    expect(asFileEntry({ etag: '"e"', contentType: 42, bytes })).toEqual({ etag: '"e"', contentType: null, bytes });
   });
 
   it('treats a missing or mistyped body as a miss, not as an empty file', () => {
     // This is the regression: `entry.b64 ?? ''` decoded to zero bytes and
     // answered `200 Content-Length: 0` for a file that exists.
     expect(asFileEntry({ etag: '"e"' })).toBeNull();
-    expect(asFileEntry({ etag: '"e"', b64: null })).toBeNull();
-    expect(asFileEntry({ etag: '"e"', b64: 42 })).toBeNull();
-  });
-
-  it('treats undecodable base64 as a miss instead of throwing', () => {
-    expect(asFileEntry({ etag: '"e"', b64: '!!!not base64!!!' })).toBeNull();
+    expect(asFileEntry({ etag: '"e"', bytes: null })).toBeNull();
+    expect(asFileEntry({ etag: '"e"', bytes: 42 })).toBeNull();
+    expect(asFileEntry({ etag: '"e"', bytes: 'aGk=' })).toBeNull();
+    expect(asFileEntry({ etag: '"e"', b64: 'aGk=' })).toBeNull();
   });
 
   it('treats a missing or empty etag as a miss', () => {
-    expect(asFileEntry({ b64 })).toBeNull();
-    expect(asFileEntry({ etag: '', b64 })).toBeNull();
+    expect(asFileEntry({ bytes })).toBeNull();
+    expect(asFileEntry({ etag: '', bytes })).toBeNull();
   });
 
   it('treats a non-object as a miss', () => {
@@ -83,15 +89,19 @@ describe('asFileEntry', () => {
     }
   });
 
-  it('round-trips a real payload without corrupting it', () => {
-    // Byte values above 0x7F are the interesting case: a `charCodeAt`/UTF-8
-    // round trip through `btoa` would mangle them, which is why `b64` is
-    // re-encoded from the *decoded bytes* rather than passed through as text.
-    const bytes = new Uint8Array([0, 1, 2, 250, 251, 252, 253, 254, 255]);
-    const entry = asFileEntry({ etag: '"e"', b64: bytesToBase64(bytes) });
+  it('passes high bytes through without corrupting them', () => {
+    // Byte values above 0x7F are the interesting case for the old base64 path;
+    // binary entries never encode, so they round-trip by identity.
+    const high = new Uint8Array([0, 1, 2, 250, 251, 252, 253, 254, 255]);
+    const entry = asFileEntry({ etag: '"e"', bytes: high });
     expect(entry).not.toBeNull();
-    expect(entry?.b64).toBe(bytesToBase64(bytes));
-    const decoded = base64ToBytes(entry?.b64 ?? '');
-    expect([...decoded]).toEqual([...bytes]);
+    expect([...(entry?.bytes ?? [])]).toEqual([...high]);
+  });
+
+  it('wraps an ArrayBuffer body rather than missing', () => {
+    const bytes = new Uint8Array([1, 2, 3]);
+    const entry = asFileEntry({ etag: '"e"', bytes: bytes.buffer });
+    expect(entry).not.toBeNull();
+    expect([...(entry?.bytes ?? [])]).toEqual([1, 2, 3]);
   });
 });
