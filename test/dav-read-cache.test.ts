@@ -3,10 +3,9 @@ import { KvCache } from '@durable-dav/backend-runtime/kv';
 import type { KvNamespaceLike } from '@durable-dav/backend-runtime/kv';
 import { buildKvKey, clampTtl, digest128, KV_DOMAINS, KV_MAX_KEY_LENGTH } from '@durable-dav/backend-runtime/kv';
 import { Tokens, createRequestScope } from '@durable-dav/backend-services/composition';
+import { base64ToBytes, bytesToBase64 } from '@durable-dav/shared/utils';
 import {
   MAX_CACHED_FILE_BYTES,
-  base64ToBytes,
-  bytesToBase64,
   cacheControlFor,
   cacheKeyForVolume,
   etagForPropfind,
@@ -23,21 +22,52 @@ import {
 } from '../apps/api/src/workers/routes/DavReadCache';
 
 // In-memory fake of the single CACHE binding (structural KvNamespaceLike).
-// Ported from ../Git `test/kv-cache.test.ts`.
-function makeFakeKv(
-  initial: Record<string, string> = {},
-): KvNamespaceLike & { store: Map<string, string>; seen: Array<{ key: string; ttl?: number }> } {
-  const store = new Map(Object.entries(initial));
+// Ported from ../Git `test/kv-cache.test.ts`. Stores text and binary entries
+// separately so `getBinary`/`getWithMetadata` behave like the real binding:
+// binary values carry KV metadata, text values do not.
+function makeFakeKv(initial: Record<string, string> = {}): KvNamespaceLike & {
+  store: Map<string, { text?: string; bytes?: Uint8Array; metadata?: unknown }>;
+  seen: Array<{ key: string; ttl?: number }>;
+} {
+  const store = new Map<string, { text?: string; bytes?: Uint8Array; metadata?: unknown }>(
+    Object.entries(initial).map(([key, text]) => [key, { text }]),
+  );
   const seen: Array<{ key: string; ttl?: number }> = [];
-  return {
+  const ns = {
     store,
     seen,
-    get(key: string): Promise<string | null> {
-      return Promise.resolve(store.has(key) ? (store.get(key) as string) : null);
+    get(key: string, type?: string): Promise<string | ArrayBuffer | null> {
+      const entry = store.get(key);
+      if (!entry) return Promise.resolve(null);
+      if (type === 'arrayBuffer') {
+        if (entry.bytes) return Promise.resolve(entry.bytes.slice().buffer as ArrayBuffer);
+        if (entry.text !== undefined) return Promise.resolve(new TextEncoder().encode(entry.text).buffer as ArrayBuffer);
+        return Promise.resolve(null);
+      }
+      if (entry.text !== undefined) return Promise.resolve(entry.text);
+      return Promise.resolve(null);
     },
-    put(key: string, value: string, options?: { expirationTtl?: number }): Promise<void> {
+    getWithMetadata(key: string, type?: string): Promise<{ value: string | ArrayBuffer | null; metadata: unknown }> {
+      const entry = store.get(key);
+      if (!entry) return Promise.resolve({ value: null, metadata: undefined });
+      if (type === 'arrayBuffer' || type === undefined) {
+        if (entry.bytes) return Promise.resolve({ value: entry.bytes.slice().buffer as ArrayBuffer, metadata: entry.metadata });
+        if (entry.text !== undefined)
+          return Promise.resolve({ value: new TextEncoder().encode(entry.text).buffer as ArrayBuffer, metadata: entry.metadata });
+      }
+      return Promise.resolve({ value: null, metadata: entry.metadata });
+    },
+    put(key: string, value: string | ArrayBuffer | Uint8Array, options?: { expirationTtl?: number; metadata?: unknown }): Promise<void> {
       seen.push({ key, ttl: options?.expirationTtl });
-      store.set(key, value);
+      if (typeof value === 'string') {
+        store.set(key, { text: value, metadata: options?.metadata });
+      } else if (value instanceof ArrayBuffer) {
+        store.set(key, { bytes: new Uint8Array(value.slice(0)), metadata: options?.metadata });
+      } else if (value instanceof Uint8Array) {
+        store.set(key, { bytes: value.slice(), metadata: options?.metadata });
+      } else {
+        store.set(key, { text: String(value), metadata: options?.metadata });
+      }
       return Promise.resolve();
     },
     delete(key: string): Promise<boolean> {
@@ -60,6 +90,10 @@ function makeFakeKv(
       });
     },
   };
+  return ns as unknown as KvNamespaceLike & {
+    store: Map<string, { text?: string; bytes?: Uint8Array; metadata?: unknown }>;
+    seen: Array<{ key: string; ttl?: number }>;
+  };
 }
 
 describe('dav KV domains', () => {
@@ -67,7 +101,7 @@ describe('dav KV domains', () => {
     expect(KV_DOMAINS.davProp.ttlSeconds).toBe(120);
     expect(KV_DOMAINS.davFile.ttlSeconds).toBe(300);
     expect(KV_DOMAINS.davMeta.ttlSeconds).toBe(60);
-    expect(KV_DOMAINS.davFile.maxValueBytes).toBe(1_048_576);
+    expect(KV_DOMAINS.davFile.maxValueBytes).toBe(10_485_760);
     expect(buildKvKey('davProp', ['alice/demo', 'x'])).toBe('davProp:v1:alice%2Fdemo:x');
   });
 
@@ -131,6 +165,8 @@ describe('KvCache without a binding', () => {
     await expect(cache.putText('davProp', ['a'], 'v')).resolves.toBe(false);
     await expect(cache.getJson('davProp', ['a'])).resolves.toBeNull();
     await expect(cache.putJson('davProp', ['a'], { v: 1 })).resolves.toBe(false);
+    await expect(cache.getBinary('davFile', ['a'])).resolves.toBeNull();
+    await expect(cache.putBinary('davFile', ['a'], new Uint8Array([1]), { etag: '"e"', contentType: null })).resolves.toBe(false);
     await expect(cache.del('davProp', ['a'])).resolves.toBeUndefined();
     await expect(cache.purgePrefix('davProp')).resolves.toBe(0);
   });
@@ -158,23 +194,53 @@ describe('KvCache DAV round-trips', () => {
     const cache = new KvCache(kv);
     await cache.putText('davProp', ['alice/demo', 'a'], 'a');
     await cache.putText('davProp', ['alice/demo', 'b'], 'b');
-    await cache.putText('davFile', ['alice/demo', 'a'], 'c');
+    await cache.putBinary('davFile', ['alice/demo', 'a'], new Uint8Array([99]), { etag: '"c"', contentType: null });
     await expect(cache.purgePrefix('davProp', ['alice/demo'])).resolves.toBe(2);
-    await expect(cache.getText('davFile', ['alice/demo', 'a'])).resolves.toBe('c');
+    await expect(cache.getBinary('davFile', ['alice/demo', 'a'])).resolves.toEqual({
+      bytes: new Uint8Array([99]),
+      metadata: { etag: '"c"', contentType: null },
+    });
+  });
+
+  it('stores file binaries with metadata and rejects oversize or etag-less writes', async () => {
+    const kv = makeFakeKv();
+    const cache = new KvCache(kv);
+    await expect(
+      cache.putBinary('davFile', ['alice/demo', 'a'], new Uint8Array([1, 2, 3]), { etag: '"e"', contentType: 'text/plain' }),
+    ).resolves.toBe(true);
+    await expect(cache.getBinary('davFile', ['alice/demo', 'a'])).resolves.toEqual({
+      bytes: new Uint8Array([1, 2, 3]),
+      metadata: { etag: '"e"', contentType: 'text/plain' },
+    });
+    expect(kv.seen[0].ttl).toBe(KV_DOMAINS.davFile.ttlSeconds);
+    await expect(
+      cache.putBinary('davFile', ['w'], new Uint8Array(KV_DOMAINS.davFile.maxValueBytes + 1), { etag: '"big"', contentType: null }),
+    ).resolves.toBe(false);
+    await expect(cache.putBinary('davFile', ['w'], new Uint8Array([1]), { etag: '', contentType: null })).resolves.toBe(false);
+  });
+
+  it('reads text-only entries as a binary miss (legacy rows migrate via getJson)', async () => {
+    const kv = makeFakeKv();
+    const cache = new KvCache(kv);
+    await cache.putText('davFile', ['alice/demo', 'legacy'], '{"b64":"aGk="}');
+    await expect(cache.getBinary('davFile', ['alice/demo', 'legacy'])).resolves.toBeNull();
   });
 });
 
 describe('KvCache backend failures stay fail-soft', () => {
   it('returns null/false on throwing bindings', async () => {
+    const boom = (): Promise<never> => Promise.reject(new Error('boom'));
     const failing: KvNamespaceLike = {
-      get: () => Promise.reject(new Error('boom')),
-      put: () => Promise.reject(new Error('boom')),
-      delete: () => Promise.reject(new Error('boom')),
-      list: () => Promise.reject(new Error('boom')),
+      get: boom as KvNamespaceLike['get'],
+      put: boom,
+      delete: boom,
+      list: boom,
     };
     const cache = new KvCache(failing);
     await expect(cache.getText('davProp', ['a'])).resolves.toBeNull();
     await expect(cache.putText('davProp', ['a'], 'v')).resolves.toBe(false);
+    await expect(cache.getBinary('davFile', ['a'])).resolves.toBeNull();
+    await expect(cache.putBinary('davFile', ['a'], new Uint8Array([1]), { etag: '"e"', contentType: null })).resolves.toBe(false);
     await expect(cache.del('davProp', ['a'])).resolves.toBeUndefined();
     await expect(cache.purgePrefix('davProp')).resolves.toBe(0);
   });
@@ -257,13 +323,13 @@ describe('DavReadCache helpers', () => {
     await expect(getCachedPropfind(cache, 'alice', 'demo', 'docs', '1', '<b/>')).resolves.toBeNull();
   });
 
-  it('round-trips small files and skips oversize bodies', async () => {
+  it('round-trips files as binary and skips oversize bodies', async () => {
     const kv = makeFakeKv();
     const cache = new KvCache(kv);
     const bytes = new Uint8Array([104, 105]);
     await putCachedFile(cache, 'alice', 'demo', 'a.txt', bytes, 'text/plain', '"etag1"');
     await expect(getCachedFile(cache, 'Alice', 'Demo', 'a.txt')).resolves.toEqual({
-      b64: bytesToBase64(bytes),
+      bytes,
       contentType: 'text/plain',
       etag: '"etag1"',
     });
@@ -271,6 +337,31 @@ describe('DavReadCache helpers', () => {
     const before = kv.seen.length;
     await putCachedFile(cache, 'alice', 'demo', 'big.bin', big, 'application/octet-stream', '"big"');
     expect(kv.seen.length).toBe(before);
+  });
+
+  it('reads pre-binary base64 entries until their TTL expires', async () => {
+    const kv = makeFakeKv();
+    const cache = new KvCache(kv);
+    const bytes = new Uint8Array([104, 105]);
+    await cache.putJson('davFile', ['alice/demo', 'path:legacy.txt'], {
+      b64: bytesToBase64(bytes),
+      contentType: 'text/plain',
+      etag: '"old"',
+    });
+    await expect(getCachedFile(cache, 'alice', 'demo', 'legacy.txt')).resolves.toEqual({
+      bytes,
+      contentType: 'text/plain',
+      etag: '"old"',
+    });
+  });
+
+  it('treats undecodable legacy entries and metadata-less binaries as misses', async () => {
+    const kv = makeFakeKv();
+    const cache = new KvCache(kv);
+    await cache.putJson('davFile', ['alice/demo', 'path:bad.txt'], { b64: '!!!not base64!!!', etag: '"e"' });
+    await expect(getCachedFile(cache, 'alice', 'demo', 'bad.txt')).resolves.toBeNull();
+    await kv.put(buildKvKey('davFile', ['alice/demo', 'path:bare.bin']), new Uint8Array([1]).slice().buffer as ArrayBuffer);
+    await expect(getCachedFile(cache, 'alice', 'demo', 'bare.bin')).resolves.toBeNull();
   });
 
   it('invalidates the volume prop+file caches', async () => {
@@ -297,11 +388,12 @@ describe('DavReadCache helpers', () => {
   });
 
   it('stays fail-soft when the KV backend throws', async () => {
+    const boom = (): Promise<never> => Promise.reject(new Error('boom'));
     const failing: KvNamespaceLike = {
-      get: () => Promise.reject(new Error('boom')),
-      put: () => Promise.reject(new Error('boom')),
-      delete: () => Promise.reject(new Error('boom')),
-      list: () => Promise.reject(new Error('boom')),
+      get: boom as KvNamespaceLike['get'],
+      put: boom,
+      delete: boom,
+      list: boom,
     };
     const cache = new KvCache(failing);
     await expect(getCachedPropfind(cache, 'a', 'b', '', '1', '<x/>')).resolves.toBeNull();

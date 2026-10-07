@@ -4,8 +4,6 @@ import type { DavAuthResult } from '@/middleware/DavAuth';
 import { applyDavForwardHeaders } from './davForwardHeaders';
 import {
   MAX_CACHED_FILE_BYTES,
-  base64ToBytes,
-  bytesToBase64,
   cacheControlFor,
   etagForPropfind,
   getCachedFile,
@@ -44,34 +42,34 @@ type DavContext = ApiContext;
 function asPropfindEntry(raw: unknown): { etag: string; body: string } | null {
   if (typeof raw !== 'object' || raw === null) return null;
   const entry = raw as { etag?: unknown; body?: unknown };
-  return typeof entry.etag !== 'string' || entry.etag === '' || (typeof entry.body !== 'string') ? null : { etag: entry.etag, body: entry.body };
+  return typeof entry.etag !== 'string' || entry.etag === '' || typeof entry.body !== 'string'
+    ? null
+    : { etag: entry.etag, body: entry.body };
 }
 
 /**
  * `file` counterpart of {@link asPropfindEntry}.
  *
- * `b64` is validated by round-tripping rather than by shape: an entry whose
- * base64 does not decode is unusable, and `atob` throwing here turns a bad
- * entry into a miss instead of a 500.
+ * Binary entries carry raw `bytes`; anything else (including pre-binary
+ * base64-JSON, which `getCachedFile` already normalises) is a miss. An empty
+ * file is a valid entry — only the shape is validated, never the length.
  */
-function asFileEntry(raw: unknown): { etag: string; contentType?: string | null; b64: string } | null {
+function asFileEntry(raw: unknown): { etag: string; contentType: string | null; bytes: Uint8Array } | null {
   if (typeof raw !== 'object' || raw === null) return null;
-  const entry = raw as { etag?: unknown; contentType?: unknown; b64?: unknown };
-  if (typeof entry.etag !== 'string' || entry.etag === '' || (typeof entry.b64 !== 'string')) return null;
-  let bytes: Uint8Array;
-  try {
-    bytes = base64ToBytes(entry.b64);
-  } catch {
-    // Not decodable base64. Treated as a miss rather than letting `atob`'s
-    // throw escape as a 500 on the read path.
+  const entry = raw as { etag?: unknown; contentType?: unknown; bytes?: unknown };
+  if (typeof entry.etag !== 'string' || entry.etag === '') return null;
+  let bytes: Uint8Array | null = null;
+  if (entry.bytes instanceof Uint8Array) {
+    bytes = entry.bytes;
+  } else if (entry.bytes instanceof ArrayBuffer) {
+    bytes = new Uint8Array(entry.bytes.slice(0));
+  } else {
     return null;
   }
   return {
     etag: entry.etag,
     contentType: typeof entry.contentType === 'string' ? entry.contentType : null,
-    // Re-encoded so the decoded and stored forms cannot disagree, and so the
-    // caller never holds both at once.
-    b64: bytesToBase64(bytes),
+    bytes,
   };
 }
 
@@ -80,7 +78,7 @@ function asFileEntry(raw: unknown): { etag: string; contentType?: string | null;
 */
 function respondFromCache(
   kind: 'file' | 'propfind',
-  entry: { etag: string; contentType?: string | null; body: string } | { etag: string; contentType?: string | null; b64: string },
+  entry: { etag: string; contentType?: string | null; body: string } | { etag: string; contentType?: string | null; bytes: Uint8Array },
   request: Request,
   headOnly: boolean,
 ): Response {
@@ -100,8 +98,7 @@ function respondFromCache(
       },
     });
   }
-  const b64 = 'b64' in entry ? entry.b64 : '';
-  const bytes = base64ToBytes(b64);
+  const bytes = 'bytes' in entry ? entry.bytes : new Uint8Array(0);
   return new Response(headOnly ? null : (bytes as BodyInit), {
     status: 200,
     headers: {
@@ -157,7 +154,7 @@ interface ServeReadArgs {
 }
 
 /**
- * `GET`/`HEAD` with a KV-cached small-file body.
+ * `GET`/`HEAD` with a KV-cached file body (binary, up to `MAX_CACHED_FILE_BYTES`).
  *
  * Range slices bypass the cache (per-request offsets, and `dofs.read` needs
  * them). HTML collection listings are never cached.

@@ -26,8 +26,8 @@ const KV_DOMAINS: Record<KvDomainName, KvDomainDef> = {
   },
   davFile: {
     ttlSeconds: 300,
-    maxValueBytes: 1_048_576,
-    description: 'Small file GET bodies (base64) per volume+path; invalidated on write. Only under size cap.',
+    maxValueBytes: 10_485_760,
+    description: 'File GET bodies (binary + etag/contentType metadata) per volume+path; invalidated on write. Only under size cap.',
   },
   davMeta: {
     ttlSeconds: 60,

@@ -17,15 +17,33 @@ interface KvListPage {
   cursor?: string;
 }
 
+interface KvGetWithMetadataResult {
+  value: string | ArrayBuffer | null;
+  metadata: unknown;
+}
+
 interface KvNamespaceLike {
   get(key: string): Promise<string | null>;
-  put(key: string, value: string, options?: { expirationTtl?: number }): Promise<void>;
+  get(key: string, type: 'text'): Promise<string | null>;
+  get(key: string, type: 'arrayBuffer'): Promise<ArrayBuffer | null>;
+  getWithMetadata?(key: string, type: 'arrayBuffer'): Promise<KvGetWithMetadataResult>;
+  put(key: string, value: string | ArrayBuffer, options?: { expirationTtl?: number; metadata?: unknown }): Promise<void>;
   delete(key: string): Promise<unknown>;
   list(options: { prefix: string; limit?: number; cursor?: string }): Promise<KvListPage>;
 }
 
 interface KvPutOptions {
   ttlSeconds?: number;
+}
+
+interface KvFileMetadata {
+  etag: string;
+  contentType: string | null;
+}
+
+interface KvBinaryEntry {
+  bytes: Uint8Array;
+  metadata: KvFileMetadata;
 }
 
 const PURGE_LIST_LIMIT = 1000;
@@ -93,6 +111,77 @@ class KvCache {
     return typeof raw === 'string' && this.putText(domain, parts, raw, options);
   }
 
+  /**
+   * Binary read for the `davFile` domain: value bytes plus `{etag, contentType}`
+   * KV metadata in a single entry. Old base64-JSON entries carry no metadata
+   * and read as a miss here — the caller falls back to `getJson` for one TTL
+   * window rather than this layer knowing the legacy shape.
+   */
+  public async getBinary(domain: KvDomainName, parts: readonly string[]): Promise<KvBinaryEntry | null> {
+    const ns = this.namespace;
+    if (!ns || typeof ns.getWithMetadata !== 'function') return null;
+    try {
+      const res = await ns.getWithMetadata(buildKvKey(domain, parts), 'arrayBuffer');
+      if (!res || res.value == null) return null;
+      const value: unknown = res.value;
+      let bytes: Uint8Array | null = null;
+      if (value instanceof ArrayBuffer) {
+        bytes = new Uint8Array(value.slice(0));
+      } else if (value instanceof Uint8Array) {
+        bytes = value.slice();
+      } else if (typeof value === 'string') {
+        bytes = new TextEncoder().encode(value);
+      }
+      if (!bytes) return null;
+      const meta = res.metadata as { etag?: unknown; contentType?: unknown } | null | undefined;
+      if (typeof meta !== 'object' || meta === null || typeof meta.etag !== 'string' || meta.etag === '') return null;
+      return { bytes, metadata: { etag: meta.etag, contentType: typeof meta.contentType === 'string' ? meta.contentType : null } };
+    } catch (error) {
+      logger.debug(`KV getBinary failed for ${domain}: ${error instanceof Error ? error.message : String(error)}`);
+      return null;
+    }
+  }
+
+  /**
+   * Binary write for the `davFile` domain. Size is enforced on raw bytes
+   * (no base64 inflation) and failures stay fail-soft like `putText`.
+   */
+  public async putBinary(
+    domain: KvDomainName,
+    parts: readonly string[],
+    bytes: Uint8Array,
+    metadata: { etag: string; contentType: string | null },
+    options?: KvPutOptions,
+  ): Promise<boolean> {
+    const ns = this.namespace;
+    if (!ns) return false;
+    if (!(bytes instanceof Uint8Array)) {
+      logger.debug(`KV putBinary skipped for ${domain}: value is not bytes.`);
+      return false;
+    }
+    const def = KV_DOMAINS[domain];
+    if (bytes.byteLength > def.maxValueBytes) {
+      logger.debug(`KV putBinary skipped for ${domain}: value exceeds ${def.maxValueBytes} bytes.`);
+      return false;
+    }
+    if (typeof metadata?.etag !== 'string' || metadata.etag === '') {
+      logger.debug(`KV putBinary skipped for ${domain}: missing etag metadata.`);
+      return false;
+    }
+    try {
+      const ttl = clampTtl(options?.ttlSeconds, domain);
+      const contentType = typeof metadata.contentType === 'string' ? metadata.contentType : null;
+      await ns.put(buildKvKey(domain, parts), bytes.slice().buffer, {
+        expirationTtl: ttl,
+        metadata: { etag: metadata.etag, contentType },
+      });
+      return true;
+    } catch (error) {
+      logger.debug(`KV putBinary failed for ${domain}: ${error instanceof Error ? error.message : String(error)}`);
+      return false;
+    }
+  }
+
   public async del(domain: KvDomainName, parts: readonly string[]): Promise<void> {
     const ns = this.namespace;
     if (!ns) return;
@@ -129,4 +218,4 @@ class KvCache {
 }
 
 export { KvCache };
-export type { KvListPage, KvNamespaceLike, KvPutOptions };
+export type { KvListPage, KvNamespaceLike, KvPutOptions, KvBinaryEntry, KvFileMetadata, KvGetWithMetadataResult };

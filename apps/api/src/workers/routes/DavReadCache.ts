@@ -1,14 +1,15 @@
 import type { KvCache } from '@durable-dav/backend-runtime/kv';
 import { digest128, invalidateDavVolumeCaches } from '@durable-dav/backend-runtime/kv';
 import { normalizeVolumeKey, weakEtagValue } from '@durable-dav/webdav';
-import {  bytesToBase64 } from '@durable-dav/shared/utils';
+import { base64ToBytes } from '@durable-dav/shared/utils';
 
 // KV-backed read cache for DAV RPCs (Git `RepoReadCache` pattern).
 // D1/DO stay authoritative; KV is loss-tolerant. All keys use the canonical
 // lowercase volume key so `Foo/Bar` and `foo/bar` share one entry, matching
 // `DAV_VOLUME.getByName` sharding. PROPFIND snapshots live in the `davProp`
-// domain and are invalidated on write; small file bodies live in the `davFile`
-// domain keyed by volume+path. Both are scaled together by
+// domain and are invalidated on write; file bodies live in the `davFile`
+// domain as binary values with `{etag, contentType}` metadata, keyed by
+// volume+path. Both are scaled together by
 // `DAV_CACHE_TTL_SECONDS` (see `contentTtls`). The per-owner volume *list*
 // snapshot is a third domain, `davMeta`, and is independent of that setting —
 // see `DavVolumeListCache`, which also explains why it is keyed on the account
@@ -37,10 +38,11 @@ function contentTtls(configuredSeconds: number | null | undefined): { prop: numb
   // so they never outlive half the file TTL.
   return { prop: Math.max(1, Math.floor(base / 2.5)), file: Math.floor(base) };
 }
-// Upper bound for KV-cached file bodies (raw bytes). `davFile` caps at
-// 1MiB; base64 inflates ~33%, so only small responses are cached.
-// Large files bypass the cache and always hit the DO.
-const MAX_CACHED_FILE_BYTES = 700_000;
+// Upper bound for KV-cached file bodies (raw bytes, stored binary with KV
+// metadata — no base64 inflation). Files over the cap bypass the cache and
+// always hit the DO. Well under the 25 MB KV per-entry limit with headroom;
+// the binding constraint is the 1 GB namespace quota, not the entry size.
+const MAX_CACHED_FILE_BYTES = 10_485_760;
 
 /**
  * Longest inner path the KV cache will key on.
@@ -152,9 +154,16 @@ interface CachedPropfind {
 }
 
 interface CachedFile {
-  b64: string;
-  contentType: string;
+  bytes: Uint8Array;
+  contentType: string | null;
   etag: string;
+}
+
+// Pre-binary entry shape: base64 JSON. Read-only fallback for one TTL window.
+interface LegacyCachedFile {
+  b64?: unknown;
+  contentType?: unknown;
+  etag?: unknown;
 }
 
 function etagForPropfind(volumeKey: string, innerPath: string, depth: string, bodyHash: string): string {
@@ -200,7 +209,23 @@ async function putCachedPropfind(
 async function getCachedFile(cache: KvCache, owner: string, volume: string, innerPath: string): Promise<CachedFile | null> {
   if (!isCacheablePath(innerPath)) return null;
   try {
-    return await cache.getJson<CachedFile>('davFile', fileCacheParts(cacheKeyForVolume(owner, volume), innerPath));
+    const hit = await cache.getBinary('davFile', fileCacheParts(cacheKeyForVolume(owner, volume), innerPath));
+    if (hit) return { bytes: hit.bytes, contentType: hit.metadata.contentType, etag: hit.metadata.etag };
+  } catch {
+    return null;
+  }
+  // Fallback for pre-binary base64-JSON entries still within their TTL.
+  // No metadata on those rows, so `getBinary` above reads them as a miss.
+  try {
+    const legacy = await cache.getJson<LegacyCachedFile>('davFile', fileCacheParts(cacheKeyForVolume(owner, volume), innerPath));
+    if (!legacy || typeof legacy.etag !== 'string' || legacy.etag === '' || typeof legacy.b64 !== 'string') return null;
+    let bytes: Uint8Array;
+    try {
+      bytes = base64ToBytes(legacy.b64);
+    } catch {
+      return null;
+    }
+    return { bytes, contentType: typeof legacy.contentType === 'string' ? legacy.contentType : null, etag: legacy.etag };
   } catch {
     return null;
   }
@@ -223,13 +248,17 @@ async function putCachedFile(
   // only function that talks to a KV namespace, so it is the right place to
   // enforce the platform's value-size limit rather than trusting every future
   // caller to have remembered it.
-  if (bytes.byteLength > MAX_CACHED_FILE_BYTES) return;
+  if (!(bytes instanceof Uint8Array) || bytes.byteLength > MAX_CACHED_FILE_BYTES) return;
+  if (typeof etag !== 'string' || etag === '') return;
   try {
-    await cache.putJson(
+    await cache.putBinary(
       'davFile',
       fileCacheParts(cacheKeyForVolume(owner, volume), innerPath),
-      { b64: bytesToBase64(bytes), contentType, etag } satisfies CachedFile,
-      { ttlSeconds },
+      bytes,
+      { etag, contentType },
+      {
+        ttlSeconds,
+      },
     );
   } catch {
     // Best-effort cache population.
@@ -269,12 +298,8 @@ export {
   getCachedFile,
   putCachedFile,
   invalidateVolumeCaches,
-  
-  
   invalidatesReadCache,
   isCacheablePath,
   contentTtls,
 };
 export type { CachedPropfind, CachedFile };
-
-export {base64ToBytes, bytesToBase64} from '@durable-dav/shared/utils';
