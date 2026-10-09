@@ -2,11 +2,11 @@ import { useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Button } from '../ui/Button';
 import { Input, Label, Select } from '../ui/Input';
-import { createReplication } from '../../services/replicationService';
-import type { CreateReplicationInput } from '../../services/replicationService';
+import { createReplication, REPLICATION_MODES } from '../../services/replicationService';
+import type { CreateReplicationInput, ReplicationMode } from '../../services/replicationService';
 import { toLocalizedErrorMessage } from '../../lib/backendErrors';
 
-const MODES = ['keep-both', 'sync', 'copy-only'] as const;
+const MODES = REPLICATION_MODES;
 
 /**
  * What each mode will and will not do.
@@ -15,7 +15,7 @@ const MODES = ['keep-both', 'sync', 'copy-only'] as const;
  * differ in a way a user has to be told about *before* choosing: one of them will
  * delete files on the remote, and the other will never overwrite anything.
  */
-function modeExplanation(t: (key: string, fallback: string) => string, mode: (typeof MODES)[number]): string {
+function modeExplanation(t: (key: string, fallback: string) => string, mode: ReplicationMode): string {
   const HELP = {
     'copy-only': [
       'replication.modeHelp.copyOnly',
@@ -28,6 +28,10 @@ function modeExplanation(t: (key: string, fallback: string) => string, mode: (ty
     'keep-both': [
       'replication.modeHelp.keepBoth',
       'Two Way. If Both Sides Change The Same File, Neither Is Overwritten: The Other Version Is Saved Beside It As A Conflict Copy.',
+    ],
+    'pull-only': [
+      'replication.modeHelp.pullOnly',
+      'One Way: The Remote Is The Only Writer. Changes Here Are Never Sent Back. A Local Version That Would Be Replaced Is Saved Beside It First.',
     ],
   } as const;
   const [key, fallback] = HELP[mode];
@@ -68,7 +72,8 @@ export function VolumeReplicationForm({
   const [authKind, setAuthKind] = useState<'none' | 'basic' | 'bearer'>('none');
   const [username, setUsername] = useState('');
   const [secret, setSecret] = useState('');
-  const [mode, setMode] = useState<(typeof MODES)[number]>('keep-both');
+  const [mode, setMode] = useState<ReplicationMode>('keep-both');
+  const [mirrorDeletions, setMirrorDeletions] = useState(false);
   const [chosenInterval, setChosenInterval] = useState<number | null>(null);
   const [saving, setSaving] = useState(false);
 
@@ -95,6 +100,10 @@ export function VolumeReplicationForm({
       username: authKind === 'basic' ? username.trim() : '',
       secret: authKind === 'none' ? '' : secret,
       mode,
+      // Sent only where the server accepts it. `true` on any other mode is a 400,
+      // so this is derived from the mode rather than being a checkbox that can be
+      // left ticked while the mode changes underneath it.
+      ...((mode === 'pull-only') && { mirrorDeletions }),
       intervalMinutes,
     };
     try {
@@ -104,6 +113,7 @@ export function VolumeReplicationForm({
       setRemoteVolume('');
       setRemotePath('');
       setSecret('');
+      setMirrorDeletions(false);
       showNotice('success', t('replication.created', 'Replication Added.'));
       onSaved();
     } catch (error) {
@@ -204,7 +214,7 @@ export function VolumeReplicationForm({
       <div className="grid gap-3 sm:grid-cols-2">
         <div className="space-y-1.5">
           <Label htmlFor="replication-mode">{t('replication.mode', 'Sync Mode')}</Label>
-          <Select id="replication-mode" value={mode} onChange={(e) => setMode(e.target.value as (typeof MODES)[number])}>
+          <Select id="replication-mode" value={mode} onChange={(e) => setMode(e.target.value as ReplicationMode)}>
             {MODES.map((option) => (
               <option key={option} value={option}>
                 {t(`replication.mode.${option}`, option)}
@@ -225,6 +235,33 @@ export function VolumeReplicationForm({
       </div>
 
       <p className="text-xs text-[var(--color-text-muted)]">{modeExplanation(t, mode)}</p>
+
+      {/* Rendered only for `pull-only`, and *below* the mode explanation, because the
+          explanation is what tells the owner that the remote wins — and this control
+          is the difference between "nothing here is ever deleted" and "anything the
+          remote lacks is deleted here". It is unchecked by default and says so. */}
+      {mode === 'pull-only' && (
+        <div className="space-y-1.5">
+          <label className="flex items-start gap-2 text-sm text-[var(--color-text-secondary)]" htmlFor="replication-mirror-deletions">
+            <input
+              id="replication-mirror-deletions"
+              type="checkbox"
+              className="mt-1"
+              checked={mirrorDeletions}
+              onChange={(e) => setMirrorDeletions(e.target.checked)}
+            />
+            <span>
+              {t('replication.mirrorDeletions', 'Delete Files Here That The Remote Does Not Have')}
+              <span className="block text-xs text-[var(--color-text-muted)]">
+                {t(
+                  'replication.mirrorDeletionsHelp',
+                  'Off, This Bucket Is A Safe Copy: The Remote’s Files Are Imported, And Nothing Here Is Ever Deleted. On, It Becomes An Exact Mirror — Off, Only After A Sync Pass Finishes Without Errors.',
+                )}
+              </span>
+            </span>
+          </label>
+        </div>
+      )}
 
       <div>
         <Button type="submit" variant="primary" size="sm" loading={saving}>

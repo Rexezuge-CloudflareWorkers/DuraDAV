@@ -5,6 +5,8 @@ import { CryptoUtil } from '@durable-dav/shared/utils';
 import type { ReplicaStateRow } from '@durable-dav/dav-store';
 import type { LocalReplicaStub, Slice } from './collectSlice';
 import { parentOf } from './collectSlice';
+import { keepBoth, pullAndPreserve } from './planTransfers';
+import type { TransferContext } from './planTransfers';
 
 const logger = createLogger('Replication');
 
@@ -99,7 +101,11 @@ class PlanExecutor {
         return 0;
       }
       case 'keep-both': {
-        await this.keepBoth(decision.path, decision.conflictPath);
+        await keepBoth(this.transferContext(), decision.path, decision.conflictPath);
+        return 0;
+      }
+      case 'pull-and-preserve': {
+        await pullAndPreserve(this.transferContext(), decision.path, decision.conflictPath, decision.contentType);
         return 0;
       }
       case 'compare-content': {
@@ -157,51 +163,22 @@ class PlanExecutor {
   }
 
   /**
-   * Preserve the losing version instead of overwriting the winner.
+   * The collaborators the transfer strategies share.
    *
-   * The winner stays at `path`; the loser is written beside it at `conflictPath` on
-   * the side it came from. Both sides therefore keep a copy, which is the only
-   * outcome from which a person can recover the edit they did not expect to lose.
+   * Built per call rather than stored: it is four references wide, and caching it
+   * would add a field to keep in step with `options` for no measurable saving.
    */
-  private async keepBoth(path: string, conflictPath: string): Promise<void> {
-    if (await this.preserveConflictingCollection(path, conflictPath)) return;
-
-    // Both sides hold bytes. Each is copied into the *other* side's conflict slot.
-    const { localStub, remote, slice } = this.options;
-    const localEntry = slice.localByPath.get(path);
-    const remoteEntry = slice.remoteByPath.get(path);
-    const remoteStream = remoteEntry === undefined || remoteEntry.isCollection ? null : await remote.readFile(path);
-    if (remoteStream !== null) {
-      const written = await localStub.applyReplicaOperations(this.options.replicationId, [
-        { op: 'write', path: conflictPath, contentType: localEntry?.contentType ?? null, data: remoteStream },
-      ]);
-      if (written.failed > 0) throw new Error(written.error ?? 'writing the conflict copy locally failed');
-    }
-    if (localEntry === undefined || localEntry.isCollection) return;
-    const localStream = await localStub.readReplicaStream(path);
-    if (localStream !== null) await remote.writeFile(conflictPath, localStream, { contentType: localEntry.contentType, ifMatch: null });
-  }
-
-  /**
-   * The collection-vs-something case of `keepBoth`.
-   *
-   * Returns whether it handled the path. Split out so `keepBoth` opens with its
-   * exception rather than burying it above two `const` declarations.
-   */
-  private async preserveConflictingCollection(path: string, conflictPath: string): Promise<boolean> {
+  private transferContext(): TransferContext {
     const { localStub, remote, replicationId, slice } = this.options;
-    const localIsCollection = slice.localByPath.get(path)?.isCollection === true;
-    if (localIsCollection) {
-      await remote.makeCollection(conflictPath);
-      return true;
-    }
-    const remoteIsCollection = slice.remoteByPath.get(path)?.isCollection === true;
-    // Nothing to preserve when the local side holds the bytes — that is the
-    // file-vs-file case, handled by the caller.
-    if (!remoteIsCollection || slice.localByPath.has(path)) return false;
-    const written = await localStub.applyReplicaOperations(replicationId, [{ op: 'mkdir', path: conflictPath }]);
-    if (written.failed > 0) throw new Error(written.error ?? 'writing the conflict collection failed');
-    return true;
+    return {
+      localStub,
+      remote,
+      replicationId,
+      slice,
+      applied: (result, what) => {
+        if (result.failed > 0) throw new Error(result.error ?? `${what} failed`);
+      },
+    };
   }
 
   /**

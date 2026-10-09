@@ -54,6 +54,8 @@ function buildReplicationPlan(input: BuildPlanInput): ReplicationPlan {
   const base = indexByPath(input.base);
   const now = input.now ?? 0;
   const nowSeconds = Math.floor(now / 1000);
+  const pullOnly = input.mode === 'pull-only';
+  const mirrorDeletions = input.mirrorDeletions === true;
 
   const paths = new Set<string>([...local.keys(), ...remote.keys(), ...base.keys()]);
   // Both trees plus every reserved conflict name, so a generated conflict path
@@ -104,8 +106,19 @@ function buildReplicationPlan(input: BuildPlanInput): ReplicationPlan {
     // --- Present on exactly one side, never seen before --------------------
     if (b === undefined) {
       if (l !== undefined && r === undefined) {
-        // New locally. Push in every mode, including `copy-only`: a mirror that
-        // refuses to accept new files is not a mirror.
+        // `pull-only` is the one mode that never creates a remote resource. A new
+        // local file is either removed (mirror) or left in place, and in the second
+        // case nothing is emitted at all — recording a base for it would make the
+        // next pass see "unchanged" and forget it was ever ignored.
+        if (pullOnly) {
+          if (mirrorDeletions && input.trustAbsences) {
+            conflicts.push({ path, winner: 'remote', kind: 'deletion', conflictPath: null });
+            emit({ kind: 'delete-local', path }, false);
+          }
+          continue;
+        }
+        // New locally. Push in every other mode, including `copy-only`: a mirror
+        // that refuses to accept new files is not a mirror.
         emit({ kind: 'push', path, contentType: l.contentType }, l.isCollection);
         continue;
       }
@@ -122,16 +135,30 @@ function buildReplicationPlan(input: BuildPlanInput): ReplicationPlan {
         emit({ kind: 'agree', path, isCollection: l.isCollection, contentType: l.contentType }, l.isCollection);
         continue;
       }
-      if (input.hashOnAmbiguous === true && couldBeIdentical(l, r)) {
+      const winner = conflictWinner(l, r, input.mode);
+      // `pull-only` cannot fall back to `keep-both` (its `conflictWinner` is never
+      // `null`), and the hash comparison is skipped rather than deferred: both sides
+      // being "new" means neither has a base, so the remote's authority already
+      // settles it and the local bytes are preserved either way.
+      if (!pullOnly && input.hashOnAmbiguous === true && couldBeIdentical(l, r)) {
         emit({ kind: 'compare-content', path, winner: 'local' }, l.isCollection);
         continue;
       }
-      const winner = conflictWinner(l, r, input.mode);
       if (winner === null) {
         const conflictPath = conflictPathFor(path, taken, nowSeconds);
         taken.add(conflictPath);
         conflicts.push({ path, winner: 'local', kind: 'conflict', conflictPath });
         emit({ kind: 'keep-both', path, winner: 'local', conflictPath }, l.isCollection || r.isCollection);
+        continue;
+      }
+      // Both sides created it and the remote is the authority: keep the local one
+      // beside the path rather than overwriting it with a version this bucket never
+      // had a say in.
+      if (winner === 'remote' && pullOnly) {
+        const conflictPath = conflictPathFor(path, taken, nowSeconds);
+        taken.add(conflictPath);
+        conflicts.push({ path, winner, kind: 'conflict', conflictPath });
+        emit({ kind: 'pull-and-preserve', path, conflictPath, contentType: l.contentType }, l.isCollection || r.isCollection);
         continue;
       }
       conflicts.push({ path, winner, kind: 'conflict', conflictPath: null });
@@ -149,6 +176,26 @@ function buildReplicationPlan(input: BuildPlanInput): ReplicationPlan {
         // evidence that this path existed and was deleted, so clearing it here
         // would make the deletion unrecoverable rather than merely deferred.
         deferredPaths.push(path);
+        continue;
+      }
+      if (pullOnly) {
+        // The remote is the authority, so its view of a deletion wins and the local
+        // copy is the one removed — but only when the owner asked for an exact
+        // mirror. Without `mirrorDeletions` this emits nothing at all, and that is
+        // the safe-copy behaviour rather than an oversight: a remote that has lost
+        // or never received a file must not be able to delete the copy the owner
+        // still has.
+        //
+        // A local deletion with the remote still holding it is the other half: the
+        // remote is authoritative, so the file comes back down rather than being
+        // propagated upward. Nothing is ever pushed in this mode.
+        if (l === undefined) {
+          emit({ kind: 'pull', path, contentType: r?.contentType ?? null }, r?.isCollection ?? false);
+          continue;
+        }
+        if (!mirrorDeletions) continue;
+        conflicts.push({ path, winner: 'remote', kind: 'deletion', conflictPath: null });
+        emit({ kind: 'delete-local', path }, false);
         continue;
       }
       // The absent side is the one that *deleted* it, so the deletion has to be
@@ -175,6 +222,18 @@ function buildReplicationPlan(input: BuildPlanInput): ReplicationPlan {
       continue;
     }
     if (localChanged && !remoteChanged) {
+      // A local-only change under `pull-only` is a real edit that the remote never
+      // made, and overwriting it with the remote's version would discard work. It is
+      // preserved beside the path first, so "the remote is authoritative" never means
+      // "the owner's edit is gone" — the same guarantee `keep-both` gives, without a
+      // write to the remote.
+      if (pullOnly) {
+        const conflictPath = conflictPathFor(path, taken, nowSeconds);
+        taken.add(conflictPath);
+        conflicts.push({ path, winner: 'remote', kind: 'conflict', conflictPath });
+        emit({ kind: 'pull-and-preserve', path, conflictPath, contentType: l.contentType }, l.isCollection);
+        continue;
+      }
       emit({ kind: 'push', path, contentType: l.contentType }, l.isCollection);
       continue;
     }
@@ -201,6 +260,16 @@ function buildReplicationPlan(input: BuildPlanInput): ReplicationPlan {
       taken.add(conflictPath);
       conflicts.push({ path, winner: 'local', kind: 'conflict', conflictPath });
       emit({ kind: 'keep-both', path, winner: 'local', conflictPath }, l.isCollection);
+      continue;
+    }
+    // `pull-only` resolves at this point too, since `conflictWinner` names the
+    // remote. Both sides changed and the remote is the authority, so its version
+    // wins — with the local one preserved locally rather than copied across.
+    if (winner === 'remote' && pullOnly) {
+      const conflictPath = conflictPathFor(path, taken, nowSeconds);
+      taken.add(conflictPath);
+      conflicts.push({ path, winner, kind: 'conflict', conflictPath });
+      emit({ kind: 'pull-and-preserve', path, conflictPath, contentType: l.contentType }, l.isCollection);
       continue;
     }
     if (input.hashOnAmbiguous === true && couldBeIdentical(l, r)) {

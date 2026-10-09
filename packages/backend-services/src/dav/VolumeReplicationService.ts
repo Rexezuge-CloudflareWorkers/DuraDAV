@@ -19,6 +19,7 @@ import {
   REPLICATION_INTERVALS,
   REPLICATION_MODES,
   REPLICATION_TARGET_KINDS,
+  readMirrorDeletions,
 } from './replicationInput';
 import type { ReplicationAuthKind, ReplicationCreateInput, ReplicationPatchInput } from './replicationInput';
 
@@ -95,6 +96,9 @@ class VolumeReplicationService {
     const dao = await this.deps.replicationDAO();
     const targetKind = oneOf(input.targetKind, REPLICATION_TARGET_KINDS, 'targetKind');
     const mode = oneOf(input.mode, REPLICATION_MODES, 'mode', 'keep-both');
+    // Resolved against the mode resolved above, so a create body carrying both can
+    // never be validated against a mode it is not going to be stored with.
+    const mirrorDeletions = readMirrorDeletions(input.mirrorDeletions, mode);
     const authKind = oneOf(input.authKind, REPLICATION_AUTH_KINDS, 'authKind', 'none');
     const intervalMinutes = normalizeInterval(input.intervalMinutes);
     const enabled = optionalBoolean(input.enabled, 'enabled', true);
@@ -147,6 +151,7 @@ class VolumeReplicationService {
       encryptedSecret: envelope.ciphertext,
       secretIv: envelope.iv,
       mode,
+      mirrorDeletions,
       intervalMinutes,
       enabled,
       now,
@@ -168,10 +173,21 @@ class VolumeReplicationService {
   public async updateReplication(volumeId: string, replicationId: string, input: ReplicationPatchInput): Promise<DavReplicationRow> {
     const dao = await this.deps.replicationDAO();
     const existing = await this.requireReplication(volumeId, replicationId);
-    const patch: { mode?: ReplicationMode; intervalMinutes?: number; enabled?: boolean; now: number } = {
+    const patch: { mode?: ReplicationMode; mirrorDeletions?: boolean; intervalMinutes?: number; enabled?: boolean; now: number } = {
       now: TimestampUtil.getCurrentUnixTimestampInSeconds(),
     };
     if (input.mode !== undefined) patch.mode = oneOf(input.mode, REPLICATION_MODES, 'mode');
+    // Resolved against the mode that will be in force *after* this patch, so the two
+    // fields can be changed together without the caller having to order them.
+    if (input.mirrorDeletions !== undefined) {
+      patch.mirrorDeletions = readMirrorDeletions(input.mirrorDeletions, patch.mode ?? existing.mode);
+    } else if (patch.mode !== undefined && existing.mirror_deletions === 1) {
+      // Moving off `pull-only` with the mirror flag still set would leave a row whose
+      // flag nothing reads, and a later switch back to `pull-only` would silently
+      // re-arm a destructive behaviour the owner had long since stopped using.
+      // Cleared rather than left dangling.
+      patch.mirrorDeletions = readMirrorDeletions(false, patch.mode);
+    }
     if (input.intervalMinutes !== undefined) patch.intervalMinutes = normalizeInterval(input.intervalMinutes);
     if (input.enabled !== undefined) patch.enabled = optionalBoolean(input.enabled, 'enabled', existing.enabled === 1);
     await dao.update(replicationId, patch);

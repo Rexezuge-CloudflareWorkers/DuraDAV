@@ -1,4 +1,5 @@
 import { buildReplicationPlan } from '@durable-dav/backend-services/replication';
+import type { ReplicationMode } from '@durable-dav/backend-services/replication';
 import { DavReplicationConflictDAO, DavReplicationDAO } from '@durable-dav/backend-data/dao';
 import type { DavReplicationRow } from '@durable-dav/backend-data/dao';
 import { KvCache, invalidateDavVolumeCaches } from '@durable-dav/backend-runtime/kv';
@@ -127,6 +128,7 @@ class ReplicationRunner {
         base: slice.base,
         trustAbsences: slice.complete,
         hashOnAmbiguous: this.config.isReplicationHashOnAmbiguous(),
+        mirrorDeletions: this.mirrorDeletions(),
         now: startedAt,
       });
 
@@ -226,8 +228,29 @@ class ReplicationRunner {
     if (stale) this.row.cursor_path = null;
   }
 
-  private mode(): 'copy-only' | 'sync' | 'keep-both' {
-    return this.row.mode === 'copy-only' || this.row.mode === 'sync' ? this.row.mode : 'keep-both';
+  /**
+   * The stored mode, or `keep-both` when the row holds something unrecognised.
+   *
+   * The fallback is the *two-way* mode, so a `mode` value this build does not know
+   * resolves to the most conservative behaviour that is not one-directional: a
+   * stored `copy-only` or `pull-only` therefore cannot be read by an older worker
+   * as "push everything" or "overwrite everything locally".
+   */
+  private mode(): ReplicationMode {
+    const known: readonly ReplicationMode[] = ['copy-only', 'sync', 'keep-both', 'pull-only'];
+    return known.includes(this.row.mode as ReplicationMode) ? (this.row.mode as ReplicationMode) : 'keep-both';
+  }
+
+  /**
+   * Whether this pass may remove a local path the remote does not have.
+   *
+   * Read as `=== 1` rather than coerced, so a row written before 0007 (where the
+   * column does not exist and `SELECT *` yields `undefined`) is the safe copy. The
+   * dangerous reading is opt-in and is only reachable through a validated create or
+   * patch.
+   */
+  private mirrorDeletions(): boolean {
+    return this.row.mirror_deletions === 1;
   }
 
   /**

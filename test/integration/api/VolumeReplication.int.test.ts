@@ -195,14 +195,54 @@ function pulledTo(inner: string): string {
 /**
 Point the pair's source at its target, with `label` as the target's subdirectory.
 */
-async function replicate(pair: Pair, label: string, mode: string): Promise<ReplicationRow> {
+async function replicate(pair: Pair, label: string, mode: string, mirrorDeletions?: boolean): Promise<ReplicationRow> {
   const res = await api(`/user/volumes/${OWNER}/${pair.source}/replications`, {
     method: 'POST',
     headers: JSON_HEADERS,
-    body: JSON.stringify({ targetKind: 'dav-volume', remoteOwner: OWNER, remoteVolume: pair.target, remotePath: label, mode, intervalMinutes: 360 }),
+    body: JSON.stringify({
+      targetKind: 'dav-volume',
+      remoteOwner: OWNER,
+      remoteVolume: pair.target,
+      remotePath: label,
+      mode,
+      ...(mirrorDeletions !== undefined && { mirrorDeletions }),
+      intervalMinutes: 360,
+    }),
   });
   expect(res.status, `configuring ${label}`).toBe(201);
   return ((await res.json()) as { replication: ReplicationRow }).replication;
+}
+
+/**
+ * Create a directory on the *target* at the path a pulled file will occupy.
+ *
+ * `<label>/<inner>` is the shape `inTarget` produces, and the target needs both
+ * segments to exist: the label is the replication's `remotePath`, and the rest is the
+ * local path the file is expected to land at once the label is stripped on the way in.
+ *
+ * Separate from `ensureDir` because this asymmetry is specific to writing on the
+ * target before a pull, and spelling it once is easier to read than a compound
+ * `ensureDir` at each call site.
+ */
+async function ensureTargetDir(pair: Pair, label: string, inner: string): Promise<void> {
+  // One `MKCOL` per segment: `MKCOL` does not create missing parents, so a single
+  // call for `label/a/b` answers 409 while `label` itself is absent.
+  const segments = inTarget(label, inner).split('/');
+  for (let depth = 1; depth <= segments.length; depth += 1) {
+    await ensureDir(pair, 'target', segments.slice(0, depth).join('/'));
+  }
+}
+
+/**
+ * `DELETE` a file on one side, tolerating an already-absent path.
+ *
+ * Used by the `pull-only` cases to make a deletion the remote or the local side is
+ * responsible for. `DELETE` on a missing path is a 404, which is not what these
+ * tests mean, so the assertion is on "gone" rather than on a status.
+ */
+async function remove(pair: Pair, side: 'source' | 'target', inner: string): Promise<void> {
+  const res = await dav(pair, side, `/${inner}`, { method: 'DELETE' });
+  expect([200, 204, 404], `DELETE ${side}/${inner}`).toContain(res.status);
 }
 
 /**
@@ -291,10 +331,13 @@ async function projection(pair: Pair, replicationId: string): Promise<Replicatio
 /**
 The recorded decisions for one replication.
 */
-async function decisions(pair: Pair, replicationId: string): Promise<Array<{ path: string; kind: string; keptPath: string | null }>> {
+async function decisions(
+  pair: Pair,
+  replicationId: string,
+): Promise<Array<{ path: string; kind: string; winner: string; keptPath: string | null }>> {
   const res = await api(`/user/volumes/${OWNER}/${pair.source}/replications/${replicationId}/conflicts`);
   expect(res.status).toBe(200);
-  return ((await res.json()) as { conflicts: Array<{ path: string; kind: string; keptPath: string | null }> }).conflicts;
+  return ((await res.json()) as { conflicts: Array<{ path: string; kind: string; winner: string; keptPath: string | null }> }).conflicts;
 }
 
 /**
@@ -316,7 +359,7 @@ beforeAll(async () => {
   const row = await testEnv.DB.prepare('SELECT username FROM users WHERE email = ?').bind(EMAIL).first<{ username: string | null }>();
   OWNER = row?.username ?? OWNER;
   expect(OWNER).not.toBe('');
-  for (const group of ['config', 'transfer', 'deletions', 'modes', 'teardown']) await makePair(group);
+  for (const group of ['config', 'transfer', 'deletions', 'modes', 'teardown', 'pullonly', 'mirror']) await makePair(group);
 });
 
 /**
@@ -656,6 +699,271 @@ describe('replication: modes', { timeout: CASE_TIMEOUT_MS }, () => {
     const rows = (await decisions(pair, source.replicationId)).filter((row) => row.path === 'raced/file.txt');
     expect(rows).toHaveLength(1);
     expect(rows[0]).toMatchObject({ kind: 'conflict', winner: 'remote', keptPath: null });
+  });
+});
+
+describe('replication: pull-only', { timeout: CASE_TIMEOUT_MS }, () => {
+  it('imports the remote tree and never writes back', async () => {
+    const pair = pairOf('pullonly');
+    const source = await replicate(pair, 'import', 'pull-only');
+    await ensureDir(pair, 'source', 'import');
+    await put(pair, 'source', 'import/local.txt', 'local only');
+    await ensureTargetDir(pair, 'import', 'import');
+    // A pull arrives at the source *without* the target's subdirectory — see
+    // `pulledTo`. So the file that should land at `import/remote.txt` is written to
+    // the target at `<label>/import/remote.txt`.
+    await put(pair, 'target', inTarget('import', 'import/remote.txt'), 'remote only');
+    await syncNow(pair, source.replicationId);
+
+    // The remote's file came down...
+    expect(await getBody(pair, 'source', 'import/remote.txt')).toBe('remote only');
+    // ...and the local one did *not* go up. This is the mode's whole invariant: a
+    // target whose definition is "never written to" must receive nothing, not even
+    // a file this bucket already held.
+    expect(await getBody(pair, 'target', inTarget('import', 'import/local.txt'))).toBeNull();
+  });
+
+  it('does not delete a local file the remote lacks, by default', async () => {
+    // The safe copy. A remote that has dropped or never received a file must not be
+    // able to delete the only surviving copy, so this case is the one that would fail
+    // if `mirrorDeletions` defaulted to `true` or were read as a mere hint.
+    const pair = pairOf('pullonly');
+    const source = await replicate(pair, 'safe', 'pull-only');
+    await ensureTargetDir(pair, 'safe', 'safe');
+    await put(pair, 'target', inTarget('safe', 'safe/shared.txt'), 'remote version');
+    await ensureDir(pair, 'source', 'safe');
+    // A file that exists only here. In a safe copy it is simply left alone — never
+    // pushed up, never deleted.
+    await put(pair, 'source', 'safe/localonly.txt', 'local only');
+    await syncNow(pair, source.replicationId);
+    expect(await getBody(pair, 'source', 'safe/shared.txt')).toBe('remote version');
+    expect(await getBody(pair, 'target', inTarget('safe', 'safe/localonly.txt'))).toBeNull();
+
+    // Now the remote loses the file it had. A safe copy keeps the local one: the
+    // remote dropping something must never delete the only surviving copy.
+    await remove(pair, 'target', inTarget('safe', 'safe/shared.txt'));
+    await syncNow(pair, source.replicationId);
+    expect(await getBody(pair, 'source', 'safe/shared.txt')).toBe('remote version');
+    expect(await getBody(pair, 'source', 'safe/localonly.txt')).toBe('local only');
+  });
+
+  it('preserves a local edit rather than overwriting it, and never writes upstream', async () => {
+    const pair = pairOf('pullonly');
+    const source = await replicate(pair, 'contested', 'pull-only');
+    await ensureDir(pair, 'source', 'contested');
+    await put(pair, 'source', 'contested/file.txt', 'original');
+    await syncNow(pair, source.replicationId);
+
+    // The target's subdirectory is created by the sync when it first *pushes* into it,
+    // and `pull-only` never pushes — so the pass just run left no `contested/` there,
+    // and the target edit below would answer 409 on a missing parent.
+    await ensureTargetDir(pair, 'contested', 'contested');
+
+    // Both sides edited, and no timestamps were arranged — which is itself the point.
+    // `pull-only` resolves by authority, so the outcome cannot depend on which
+    // server's clock was ahead. The source PUT replaces what the sync pulled down
+    // (204); the target's is a 201 because `pull-only` never pushed the file there,
+    // so the target holds no prior copy of it at all.
+    expect((await dav(pair, 'source', '/contested/file.txt', { method: 'PUT', headers: { 'Content-Type': 'text/plain' }, body: 'source edit' })).status).toBe(204);
+    expect(
+      (await dav(pair, 'target', `/${inTarget('contested', 'contested/file.txt')}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'text/plain' },
+        body: 'target edit',
+      })).status,
+    ).toBe(201);
+    await syncNow(pair, source.replicationId);
+
+    // The remote wins — and the local edit is *kept*, not discarded. This is the
+    // difference from `sync`, where the loser is overwritten: "the remote is
+    // authoritative" must not mean "the owner's work is gone".
+    expect(await getBody(pair, 'source', 'contested/file.txt')).toBe('target edit');
+    const recorded = (await decisions(pair, source.replicationId)).find((row) => row.path === 'contested/file.txt');
+    expect(recorded?.kind).toBe('conflict');
+    expect(recorded?.winner).toBe('remote');
+    expect(recorded?.keptPath).not.toBeNull();
+    expect(await getBody(pair, 'source', recorded?.keptPath ?? '')).toBe('source edit');
+
+    // The invariant, asserted on the real buckets: the target holds no conflict copy
+    // of its own, because nothing was written to it.
+    const targetCopies = (await listing(pair, 'target', inTarget('contested', 'contested'))).filter((name) => name.startsWith('file.txt.conflict-'));
+    expect(targetCopies).toEqual([]);
+  });
+
+  it('refuses mirrorDeletions on a mode that cannot read it', async () => {
+    // A 400 rather than a silent no-op: the flag is unread outside `pull-only`, so
+    // accepting it would store a setting that appears to do something and does not.
+    const pair = pairOf('pullonly');
+    for (const mode of ['copy-only', 'sync', 'keep-both']) {
+      const res = await api(`/user/volumes/${OWNER}/${pair.source}/replications`, {
+        method: 'POST',
+        headers: JSON_HEADERS,
+        body: JSON.stringify({
+          targetKind: 'dav-volume',
+          remoteOwner: OWNER,
+          remoteVolume: pair.target,
+          remotePath: `bad-${mode}`,
+          mode,
+          mirrorDeletions: true,
+          intervalMinutes: 360,
+        }),
+      });
+      expect(res.status, `${mode} + mirrorDeletions`).toBe(400);
+      expect(await res.text()).toMatch(/mirrorDeletions/);
+    }
+  });
+
+  it('refuses a non-boolean mirrorDeletions instead of coercing it', async () => {
+    const pair = pairOf('pullonly');
+    const res = await api(`/user/volumes/${OWNER}/${pair.source}/replications`, {
+      method: 'POST',
+      headers: JSON_HEADERS,
+      body: JSON.stringify({
+        targetKind: 'dav-volume',
+        remoteOwner: OWNER,
+        remoteVolume: pair.target,
+        remotePath: 'coerced',
+        mode: 'pull-only',
+        mirrorDeletions: 'true',
+        intervalMinutes: 360,
+      }),
+    });
+    expect(res.status).toBe(400);
+    expect(await res.text()).toMatch(/mirrorDeletions/);
+  });
+});
+
+describe('replication: mirror deletions', { timeout: CASE_TIMEOUT_MS }, () => {
+  it('removes a local file the remote does not have, when enabled', async () => {
+    const pair = pairOf('mirror');
+    const source = await replicate(pair, 'exact', 'pull-only', true);
+    // The shared file is written on the *target* and pulled down, so both sides have
+    // it and the base records the agreement. A local-only file could never survive
+    // this pass, which is the point of the case rather than a control for it.
+    await ensureTargetDir(pair, 'exact', 'exact');
+    await put(pair, 'target', inTarget('exact', 'exact/shared.txt'), 'shared');
+    await ensureDir(pair, 'source', 'exact');
+    await put(pair, 'source', 'exact/dropped.txt', 'will be dropped');
+    await syncNow(pair, source.replicationId);
+
+    // The first pass imports the remote's tree and drops the local-only file, which
+    // is what an exact mirror means: the local tree ends up equal to the remote's.
+    expect(await getBody(pair, 'source', 'exact/shared.txt')).toBe('shared');
+    expect(await getBody(pair, 'source', 'exact/dropped.txt')).toBeNull();
+    // And the dropped file was never pushed up, so it exists nowhere.
+    expect(await getBody(pair, 'target', inTarget('exact', 'exact/dropped.txt'))).toBeNull();
+  });
+
+  it('removes a local file the remote deletes, and records the deletion', async () => {
+    const pair = pairOf('mirror');
+    const source = await replicate(pair, 'gone', 'pull-only', true);
+    // Written on the target and pulled down, so both sides hold it before the
+    // deletion. A file that only ever existed locally would be removed by the very
+    // first pass, which would test the same thing twice.
+    await ensureTargetDir(pair, 'gone', 'gone');
+    await put(pair, 'target', inTarget('gone', 'gone/doomed.txt'), 'doomed');
+    await ensureDir(pair, 'source', 'gone');
+    await syncNow(pair, source.replicationId);
+    expect(await getBody(pair, 'source', 'gone/doomed.txt')).toBe('doomed');
+
+    // The remote is the authority: its deletion is the local tree's deletion too.
+    await remove(pair, 'target', inTarget('gone', 'gone/doomed.txt'));
+    await syncNow(pair, source.replicationId);
+    expect(await getBody(pair, 'source', 'gone/doomed.txt')).toBeNull();
+
+    // Attributable afterwards, which is the whole reason a mirror deletion is
+    // recorded rather than performed silently.
+    const rows = await decisions(pair, source.replicationId);
+    const recorded = rows.find((row) => row.path === 'gone/doomed.txt');
+    expect(recorded?.kind).toBe('deletion');
+    expect(recorded?.winner).toBe('remote');
+  });
+
+  it('restores a file deleted here, because the remote still has it', async () => {
+    // The other half of the mirror: a local deletion is not propagated upward in this
+    // mode, so the file comes back. Getting this backwards would delete the only
+    // surviving copy and leave nothing anywhere.
+    const pair = pairOf('mirror');
+    const source = await replicate(pair, 'restore', 'pull-only', true);
+    await ensureTargetDir(pair, 'restore', 'restore');
+    await put(pair, 'target', inTarget('restore', 'restore/keep.txt'), 'restored');
+    await ensureDir(pair, 'source', 'restore');
+    await syncNow(pair, source.replicationId);
+    expect(await getBody(pair, 'source', 'restore/keep.txt')).toBe('restored');
+
+    // Deleting it *here* must not propagate upward — that would delete the only
+    // surviving copy and leave nothing anywhere. The remote is the authority, so the
+    // file comes back down instead.
+    await remove(pair, 'source', 'restore/keep.txt');
+    await syncNow(pair, source.replicationId);
+    expect(await getBody(pair, 'source', 'restore/keep.txt')).toBe('restored');
+    expect(await getBody(pair, 'target', inTarget('restore', 'restore/keep.txt'))).toBe('restored');
+  });
+
+  it('can be switched on and off after creation', async () => {
+    const pair = pairOf('mirror');
+    const source = await replicate(pair, 'toggle', 'pull-only');
+    const base = `/user/volumes/${OWNER}/${pair.source}/replications/${source.replicationId}`;
+
+    const enable = await api(base, { method: 'PATCH', headers: JSON_HEADERS, body: JSON.stringify({ mirrorDeletions: true }) });
+    expect(enable.status).toBe(200);
+    expect(((await enable.json()) as { replication: { mirrorDeletions: boolean } }).replication.mirrorDeletions).toBe(true);
+
+    await ensureTargetDir(pair, 'toggle', 'toggle');
+    await put(pair, 'target', inTarget('toggle', 'toggle/shared.txt'), 'shared');
+    await ensureDir(pair, 'source', 'toggle');
+    await put(pair, 'source', 'toggle/extra.txt', 'extra');
+    await syncNow(pair, source.replicationId);
+    // Armed: the local-only file is removed.
+    expect(await getBody(pair, 'source', 'toggle/extra.txt')).toBeNull();
+
+    const disable = await api(base, { method: 'PATCH', headers: JSON_HEADERS, body: JSON.stringify({ mirrorDeletions: false }) });
+    expect(disable.status).toBe(200);
+    expect(((await disable.json()) as { replication: { mirrorDeletions: boolean } }).replication.mirrorDeletions).toBe(false);
+
+    await put(pair, 'source', 'toggle/extra2.txt', 'extra2');
+    await syncNow(pair, source.replicationId);
+    // Disarmed: the same situation is now left alone.
+    expect(await getBody(pair, 'source', 'toggle/extra2.txt')).toBe('extra2');
+    // The flag really was read from storage on this pass, not carried in the
+    // replication object the previous one used.
+    expect(await getBody(pair, 'source', 'toggle/shared.txt')).toBe('shared');
+  });
+
+  it('clears the flag when the mode moves off pull-only', async () => {
+    // Left set, it would be a flag nothing reads — and switching back to `pull-only`
+    // later would silently re-arm a destructive behaviour the owner had stopped using.
+    const pair = pairOf('mirror');
+    const source = await replicate(pair, 'switch', 'pull-only', true);
+    const base = `/user/volumes/${OWNER}/${pair.source}/replications/${source.replicationId}`;
+
+    const moved = await api(base, { method: 'PATCH', headers: JSON_HEADERS, body: JSON.stringify({ mode: 'sync' }) });
+    expect(moved.status).toBe(200);
+    expect(((await moved.json()) as { replication: { mode: string; mirrorDeletions: boolean } }).replication).toMatchObject({
+      mode: 'sync',
+      mirrorDeletions: false,
+    });
+  });
+
+  it('accepts the flag when mode and mirrorDeletions arrive together', async () => {
+    // Validated against the mode that will be *stored*, so a client does not have to
+    // order two requests to configure an exact mirror.
+    const pair = pairOf('mirror');
+    const res = await api(`/user/volumes/${OWNER}/${pair.source}/replications`, {
+      method: 'POST',
+      headers: JSON_HEADERS,
+      body: JSON.stringify({
+        targetKind: 'dav-volume',
+        remoteOwner: OWNER,
+        remoteVolume: pair.target,
+        remotePath: 'together',
+        mode: 'pull-only',
+        mirrorDeletions: true,
+        intervalMinutes: 360,
+      }),
+    });
+    expect(res.status).toBe(201);
+    expect(((await res.json()) as { replication: { mirrorDeletions: boolean } }).replication.mirrorDeletions).toBe(true);
   });
 });
 

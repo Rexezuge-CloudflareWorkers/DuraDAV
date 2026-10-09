@@ -4,7 +4,9 @@ import {
   normalizeRemotePath,
   normalizeInterval,
   oneOf,
+  readMirrorDeletions,
   REPLICATION_INTERVALS,
+  REPLICATION_MODES,
 } from '@durable-dav/backend-services/dav';
 import { encryptReplicationSecret, decryptReplicationSecret, generateReplicationKey, ReplicationKeyError } from '@durable-dav/backend-data/crypto';
 import { BadRequestError } from '@durable-dav/backend-errors';
@@ -43,6 +45,51 @@ describe('oneOf', () => {
 
   it('names the field and the allowed set in the message', () => {
     expect(() => oneOf('nope', ['a', 'b'] as const, 'mode')).toThrow(/mode must be one of: a, b/);
+  });
+});
+
+describe('readMirrorDeletions', () => {
+  it('accepts a real boolean', () => {
+    expect(readMirrorDeletions(true, 'pull-only')).toBe(true);
+    expect(readMirrorDeletions(false, 'pull-only')).toBe(false);
+  });
+
+  it('defaults to the safe copy', () => {
+    // Absent means `false`, so an old client keeps a non-destructive target. The
+    // opposite default would turn "did not say" into "delete".
+    expect(readMirrorDeletions(undefined, 'pull-only')).toBe(false);
+    expect(readMirrorDeletions(null, 'pull-only')).toBe(false);
+  });
+
+  it('refuses a string rather than coercing it', () => {
+    // `"true"` is the whole point: this one boolean is the difference between
+    // importing a remote's files and deleting this bucket's.
+    expect(() => readMirrorDeletions('true', 'pull-only')).toThrow(BadRequestError);
+    expect(() => readMirrorDeletions(1, 'pull-only')).toThrow(BadRequestError);
+    expect(() => readMirrorDeletions('yes', 'pull-only')).toThrow(/mirrorDeletions must be a boolean/);
+  });
+
+  it('refuses to enable it outside pull-only', () => {
+    // The flag is unread in the other three modes, so storing it would be a setting
+    // that appears to do something and does not.
+    for (const mode of ['copy-only', 'sync', 'keep-both']) {
+      expect(() => readMirrorDeletions(true, mode)).toThrow(/may only be enabled when mode is pull-only/);
+    }
+  });
+
+  it('allows it to be switched off anywhere', () => {
+    // Explicitly turning something off is never ambiguous, so it is not gated.
+    for (const mode of REPLICATION_MODES) {
+      expect(readMirrorDeletions(false, mode)).toBe(false);
+    }
+  });
+});
+
+describe('the mode list', () => {
+  it('offers exactly the four documented modes', () => {
+    // The closed list is the contract: `oneOf` answers 400 from it, and the UI
+    // mirrors it. A mode added in one place and not the other is a 400 on submit.
+    expect([...REPLICATION_MODES]).toEqual(['copy-only', 'sync', 'keep-both', 'pull-only']);
   });
 });
 

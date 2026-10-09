@@ -79,6 +79,7 @@ function toCreateInput(body: unknown): {
   username?: unknown;
   secret?: unknown;
   mode?: unknown;
+  mirrorDeletions?: unknown;
   intervalMinutes?: unknown;
   enabled?: unknown;
 } {
@@ -93,6 +94,7 @@ function toCreateInput(body: unknown): {
     username: record['username'],
     secret: record['secret'],
     mode: record['mode'],
+    mirrorDeletions: record['mirrorDeletions'],
     intervalMinutes: record['intervalMinutes'],
     enabled: record['enabled'],
   };
@@ -124,6 +126,7 @@ class UpdateReplication extends VolumeScopedRoute {
       .get(Tokens.VolumeReplicationService)
       .updateReplication(row.id, c.req.param('replicationId') ?? '', {
         mode: read.body?.['mode'],
+        mirrorDeletions: read.body?.['mirrorDeletions'],
         intervalMinutes: read.body?.['intervalMinutes'],
         enabled: read.body?.['enabled'],
       });

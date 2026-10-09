@@ -22,7 +22,12 @@ import { normalizeRemoteUrl, RemoteUrlRejectedError } from '@durable-dav/shared/
  */
 const REPLICATION_INTERVALS = [15, 60, 360, 720, 1440, 10_080] as const;
 
-const REPLICATION_MODES = ['copy-only', 'sync', 'keep-both'] as const;
+const REPLICATION_MODES = ['copy-only', 'sync', 'keep-both', 'pull-only'] as const;
+
+/**
+The mode in which mirror deletions are meaningful.
+*/
+const MIRROR_DELETION_MODE = 'pull-only';
 const REPLICATION_AUTH_KINDS = ['none', 'basic', 'bearer'] as const;
 const REPLICATION_TARGET_KINDS = ['dav', 'dav-volume'] as const;
 
@@ -47,15 +52,39 @@ type ReplicationCreateInput = {
   username?: unknown;
   secret?: unknown;
   mode?: unknown;
+  mirrorDeletions?: unknown;
   intervalMinutes?: unknown;
   enabled?: unknown;
 };
 
 type ReplicationPatchInput = {
   mode?: unknown;
+  mirrorDeletions?: unknown;
   intervalMinutes?: unknown;
   enabled?: unknown;
 };
+
+/**
+* `mirrorDeletions`, checked against the mode it will be read in.
+*
+* Type before value, for the reason every other coercion in this file gives: a
+* `"true"` must never become `true`, because this one boolean is the difference
+* between "the remote's content is imported" and "a local file the remote does not
+* have is deleted".
+*
+* Refusing `true` outside `pull-only` is not pedantry. The flag is unread in the
+* other three modes — `copy-only` already propagates local deletions to the remote,
+* and `sync`/`keep-both` propagate in both directions — so storing it would be a
+* setting that appears to do something and does not. A silent no-op is the outcome
+* that must not happen by accident.
+*/
+function readMirrorDeletions(value: unknown, mode: string): boolean {
+  const flag = optionalBoolean(value, 'mirrorDeletions', false);
+  if (flag && mode !== MIRROR_DELETION_MODE) {
+    throw new BadRequestError(`mirrorDeletions may only be enabled when mode is ${MIRROR_DELETION_MODE}`);
+  }
+  return flag;
+}
 
 /**
  * Narrow an untrusted value against a closed set.
@@ -147,6 +176,8 @@ export {
   normalizeInterval,
   oneOf,
   optionalBoolean,
+  readMirrorDeletions,
+  MIRROR_DELETION_MODE,
   optionalString,
   requireRemoteUrl,
   MAX_NAME_LENGTH,

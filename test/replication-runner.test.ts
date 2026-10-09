@@ -127,6 +127,9 @@ function replicationRow(overrides: Partial<DavReplicationRow> = {}): DavReplicat
     encrypted_secret: null,
     secret_iv: null,
     mode: 'keep-both',
+    // `0` rather than omitted: a pre-0007 row has no column at all, and
+    // `ReplicationRunner.mirrorDeletions` reads `=== 1`, so both mean "safe copy".
+    mirror_deletions: 0,
     interval_minutes: 360,
     enabled: 1,
     last_run_at: now,
@@ -457,6 +460,192 @@ describe('ReplicationRunner — transfers', () => {
     expect(target.calls.some((call) => call.op === 'write' && String(call.arg).startsWith('a.txt.conflict-'))).toBe(true);
     expect(stub.applied.some((operation) => operation.op === 'write' && String(operation.path).startsWith('a.txt.conflict-'))).toBe(true);
     expect(conflicts[0]).toMatchObject({ kind: 'conflict' });
+  });
+});
+
+/**
+ * `pull-only` end to end: the mode where nothing is ever written to the remote.
+ *
+ * The planner's half of this is proven in `replication-pull-only.test.ts`. What is
+ * left is the *wiring*, and it is worth proving separately for two reasons. First,
+ * the transfer strategies are separate code (`planTransfers`) and a branch can be
+ * planned correctly and executed wrongly. Second, `PlanExecutor.recordBase` runs
+ * after the transfers and re-reads both sides — so a decision can be right and the
+ * base it records can still resurrect or drop state on the next pass.
+ */
+describe('ReplicationRunner — pull-only', () => {
+  /**
+   * A bucket holding `a.txt` locally and on the sibling, with a base row recording
+   * that agreement — the fixture every pull-only transfer needs. `localBody` is what
+   * the local stream serves, which is how a test distinguishes the preserved copy
+   * from the pulled one.
+   */
+  function pullOnlyFixture(options?: { localEtag?: string; remoteEtag?: string; localBody?: string }): LocalReplicaStub & {
+    applied: Recorded[];
+    state: ReplicaStateRow[];
+    calls: Call[];
+  } {
+    const localEtag = options?.localEtag ?? '"l-v2"';
+    const remoteEtag = options?.remoteEtag ?? '"r-v1"';
+    const localBody = options?.localBody ?? 'local bytes';
+    const localFile: RemoteEntry = { path: 'a.txt', isCollection: false, etag: localEtag, mtime: 1000, size: localBody.length, contentType: 'text/plain' };
+    return localStub({
+      listReplicaChildren: async (path: string) => listing(path === '' ? [localFile] : []),
+      readReplicaStream: async () => new Response(localBody).body,
+      loadReplicaStateRows: async () => [
+        {
+          replicationId: 'rep_1',
+          path: 'a.txt',
+          isCollection: false,
+          localEtag: '"l-v1"',
+          localMtime: 1000,
+          localSize: 1,
+          remoteEtag,
+          remoteMtime: 1000,
+          remoteSize: 1,
+          contentType: 'text/plain',
+          syncedAt: 1,
+        },
+      ],
+    });
+  }
+
+  it('preserves a local edit and writes the remote version over it', async () => {
+    const stub = pullOnlyFixture();
+    const { runner, target, conflicts } = build({ stub, remoteFiles: { 'a.txt': 'remote version' }, row: { mode: 'pull-only' } });
+    await runner.runSlice();
+
+    // The remote is never written in this mode — not the path, not a conflict copy.
+    expect(target.applied.some((operation) => operation.op === 'write' || operation.op === 'unlink')).toBe(false);
+    // The local edit is preserved beside the path before the pull.
+    const preserved = stub.applied.find((operation) => operation.op === 'write' && String(operation.path).startsWith('a.txt.conflict-'));
+    expect(preserved).toBeDefined();
+    // And the remote's version lands at the path itself.
+    expect(stub.applied.some((operation) => operation.op === 'write' && operation.path === 'a.txt')).toBe(true);
+    expect(conflicts[0]).toMatchObject({ kind: 'conflict', winner: 'remote' });
+  });
+
+  it('records a base so the next pass sees agreement rather than repeating the pull', async () => {
+    const stub = pullOnlyFixture();
+    const { runner } = build({ stub, remoteFiles: { 'a.txt': 'remote version' }, row: { mode: 'pull-only' } });
+    await runner.runSlice();
+    // `recordBase` re-reads both sides after the transfer. A half-applied transfer
+    // must record *nothing* — a base built from what the runner believed it wrote
+    // would make the next pass see "unchanged" and never finish the job.
+    expect(stub.applied.some((operation) => operation.op === 'record')).toBe(true);
+  });
+
+  it('never writes upstream when only the remote changed', async () => {
+    const stub = localStub({
+      listReplicaChildren: async (path: string) =>
+        listing(path === '' ? [{ path: 'a.txt', isCollection: false, etag: '"l-v1"', mtime: 1000, size: 1, contentType: 'text/plain' }] : []),
+      loadReplicaStateRows: async () => [
+        {
+          replicationId: 'rep_1',
+          path: 'a.txt',
+          isCollection: false,
+          localEtag: '"l-v1"',
+          localMtime: 1000,
+          localSize: 1,
+          remoteEtag: '"r-v1"',
+          remoteMtime: 1000,
+          remoteSize: 1,
+          contentType: 'text/plain',
+          syncedAt: 1,
+        },
+      ],
+    });
+    const { runner, target } = build({ stub, remoteFiles: { 'a.txt': 'remote version' }, row: { mode: 'pull-only' } });
+    await runner.runSlice();
+    expect(target.applied.some((operation) => operation.op === 'write' || operation.op === 'unlink')).toBe(false);
+    expect(stub.applied.some((operation) => operation.op === 'write' && operation.path === 'a.txt')).toBe(true);
+  });
+
+  it('deletes a local file the remote lacks only when mirrorDeletions is set', async () => {
+    const localFile: RemoteEntry = { path: 'a.txt', isCollection: false, etag: '"l-v1"', mtime: 1000, size: 1, contentType: 'text/plain' };
+    const stub = localStub({ listReplicaChildren: async (path: string) => listing(path === '' ? [localFile] : []) });
+
+    const safe = build({ stub: localStub({ listReplicaChildren: async (path: string) => listing(path === '' ? [localFile] : []) }), row: { mode: 'pull-only', mirror_deletions: 0 } });
+    await safe.runner.runSlice();
+    expect(safe.stub.applied.some((operation) => operation.op === 'unlink')).toBe(false);
+
+    const mirror = build({ stub: localStub({ listReplicaChildren: async (path: string) => listing(path === '' ? [localFile] : []) }), row: { mode: 'pull-only', mirror_deletions: 1 } });
+    await mirror.runner.runSlice();
+    expect(mirror.stub.applied.some((operation) => operation.op === 'unlink' && operation.path === 'a.txt')).toBe(true);
+    // The remote is still never written, whatever the flag says.
+    expect(mirror.target.applied.some((operation) => operation.op === 'write' || operation.op === 'unlink')).toBe(false);
+    expect(stub.applied).toEqual([]);
+  });
+
+  it('does not delete anything when the pass could not see the whole tree', async () => {
+    // The gate, through the real runner: a listing that admits it was incomplete
+    // must not authorize a mirror deletion. This is the test that would fail if
+    // `mirrorDeletions` were read as a licence rather than as a request.
+    const localFile: RemoteEntry = { path: 'a.txt', isCollection: false, etag: '"l-v1"', mtime: 1000, size: 1, contentType: 'text/plain' };
+    const stub = localStub({
+      listReplicaChildren: async (path: string) => listing(path === '' ? [localFile] : [], false),
+      loadReplicaStateRows: async () => [
+        {
+          replicationId: 'rep_1',
+          path: 'a.txt',
+          isCollection: false,
+          localEtag: '"l-v1"',
+          localMtime: 1000,
+          localSize: 1,
+          remoteEtag: '"r-v1"',
+          remoteMtime: 1000,
+          remoteSize: 1,
+          contentType: 'text/plain',
+          syncedAt: 1,
+        },
+      ],
+    });
+    const { runner, dao } = build({ stub, row: { mode: 'pull-only', mirror_deletions: 1 } });
+    const result = await runner.runSlice();
+    expect(stub.applied.some((operation) => operation.op === 'unlink')).toBe(false);
+    expect(result.deferredPaths).toBe(1);
+    // A dirty pass keeps `pass_started_at` set only if work remains; here the tree
+    // was fully walked, so the gate closes on the `partial`/`failed` status instead.
+    expect(dao.runs[0]?.status).not.toBe('ok');
+  });
+
+  it('treats a row with no mirror_deletions column as a safe copy', async () => {
+    // A pre-0007 row has the column absent, so `SELECT *` yields `undefined`. Read
+    // as anything but "not mirroring", a deployment upgraded without running the
+    // migration would start deleting files.
+    const localFile: RemoteEntry = { path: 'a.txt', isCollection: false, etag: '"l-v1"', mtime: 1000, size: 1, contentType: 'text/plain' };
+    const stub = localStub({
+      listReplicaChildren: async (path: string) => listing(path === '' ? [localFile] : []),
+      loadReplicaStateRows: async () => [
+        {
+          replicationId: 'rep_1',
+          path: 'a.txt',
+          isCollection: false,
+          localEtag: '"l-v1"',
+          localMtime: 1000,
+          localSize: 1,
+          remoteEtag: '"r-v1"',
+          remoteMtime: 1000,
+          remoteSize: 1,
+          contentType: 'text/plain',
+          syncedAt: 1,
+        },
+      ],
+    });
+    const { runner } = build({ stub, row: { mode: 'pull-only', mirror_deletions: undefined as unknown as number } });
+    await runner.runSlice();
+    expect(stub.applied.some((operation) => operation.op === 'unlink')).toBe(false);
+  });
+
+  it('falls back to keep-both for a mode this build does not know', async () => {
+    // The two one-way modes are the dangerous ones to resolve wrongly: reading a
+    // stored `copy-only` as two-way would push, and a stored `pull-only` as
+    // two-way would overwrite. The fallback is the two-way mode *without* one of
+    // those meanings, so an unknown value never becomes a one-directional write.
+    const stub = localStub();
+    const { runner } = build({ stub, remoteFiles: { 'b.txt': 'hello' }, row: { mode: 'from-the-future' } });
+    const result = await runner.runSlice();
+    expect(result.status).toBe('ok');
   });
 });
 

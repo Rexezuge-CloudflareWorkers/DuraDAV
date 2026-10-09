@@ -15,13 +15,15 @@ import type { D1Queryable } from '../utils/D1Types';
 type ReplicationTargetKind = 'dav' | 'dav-volume';
 
 /**
- * How a path both sides changed is reconciled.
+ * How a path both sides changed is reconciled, and in which direction changes flow.
  *
  * `copy-only` is one-way on purpose: a mirror of a bucket must not import the
- * mirror's own corruption, and a backup target that silently accepts writes
- * cannot be trusted as a backup.
+ * mirror's own corruption, and a backup target that silently accepts writes cannot
+ * be trusted as a backup. `pull-only` is its mirror image — the *remote* is the
+ * authority, nothing is ever pushed, and `mirror_deletions` chooses whether a local
+ * path the remote lacks is removed or left alone.
  */
-type ReplicationMode = 'copy-only' | 'sync' | 'keep-both';
+type ReplicationMode = 'copy-only' | 'sync' | 'keep-both' | 'pull-only';
 
 type ReplicationAuthKind = 'none' | 'basic' | 'bearer';
 
@@ -39,6 +41,7 @@ export interface DavReplicationRow {
   encrypted_secret: string | null;
   secret_iv: string | null;
   mode: string;
+  mirror_deletions: number;
   interval_minutes: number;
   enabled: number;
   last_run_at: number | null;
@@ -94,6 +97,7 @@ class DavReplicationDAO extends BaseDAO {
     encryptedSecret: string | null;
     secretIv: string | null;
     mode: ReplicationMode;
+    mirrorDeletions: boolean;
     intervalMinutes: number;
     enabled: boolean;
     now: number;
@@ -105,8 +109,8 @@ class DavReplicationDAO extends BaseDAO {
         this.database
           .prepare(
             `INSERT INTO dav_replications (replication_id, volume_id, target_kind, remote_url, remote_owner, remote_volume, remote_path,
-              auth_kind, encrypted_secret, secret_iv, mode, interval_minutes, enabled, created_at, updated_at, created_by)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+              auth_kind, encrypted_secret, secret_iv, mode, mirror_deletions, interval_minutes, enabled, created_at, updated_at, created_by)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           )
           .bind(
             input.replicationId,
@@ -120,6 +124,7 @@ class DavReplicationDAO extends BaseDAO {
             input.encryptedSecret,
             input.secretIv,
             input.mode,
+            input.mirrorDeletions ? 1 : 0,
             input.intervalMinutes,
             input.enabled ? 1 : 0,
             input.now,
@@ -182,13 +187,17 @@ class DavReplicationDAO extends BaseDAO {
    */
   public async update(
     replicationId: string,
-    patch: { mode?: ReplicationMode; intervalMinutes?: number; enabled?: boolean; now: number },
+    patch: { mode?: ReplicationMode; mirrorDeletions?: boolean; intervalMinutes?: number; enabled?: boolean; now: number },
   ): Promise<void> {
     const sets: string[] = ['updated_at = ?'];
     const bindings: unknown[] = [patch.now];
     if (patch.mode !== undefined) {
       sets.push('mode = ?');
       bindings.push(patch.mode);
+    }
+    if (patch.mirrorDeletions !== undefined) {
+      sets.push('mirror_deletions = ?');
+      bindings.push(patch.mirrorDeletions ? 1 : 0);
     }
     if (patch.intervalMinutes !== undefined) {
       sets.push('interval_minutes = ?');
