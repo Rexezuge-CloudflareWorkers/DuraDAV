@@ -141,7 +141,16 @@ function conflictPathFor(path: string, taken: ReadonlySet<string>, nowSeconds: n
  * nobody could debug.
  */
 function conflictWinner(local: PlanSide, remote: PlanSide, mode: ReplicationMode): 'local' | 'remote' | null {
+  // The two one-way modes decide by *authority*, not by recency: `copy-only` makes
+  // this bucket authoritative, `pull-only` makes the remote. Neither consults a
+  // clock, which is the point — the two clocks are the thing `sync` cannot trust.
+  //
+  // `pull-only` never returns `null`, so it never reaches `keep-both`: there is no
+  // tie to fall back from when one side is simply the authority. That is safe
+  // because the planner pairs it with `pull-and-preserve`, which keeps the losing
+  // local version — so "the remote wins" never means "the local edit is gone".
   if (mode === 'copy-only') return 'local';
+  if (mode === 'pull-only') return 'remote';
   if ((mode === 'keep-both') || local.mtime === null || remote.mtime === null || (local.mtime === remote.mtime)) return null;
   return local.mtime > remote.mtime ? 'local' : 'remote';
 }

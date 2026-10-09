@@ -13,10 +13,12 @@ export {
   normalizeRemotePath,
   normalizeInterval,
   oneOf,
+  readMirrorDeletions,
   REPLICATION_INTERVALS,
   REPLICATION_MODES,
   REPLICATION_AUTH_KINDS,
   REPLICATION_TARGET_KINDS,
+  MIRROR_DELETION_MODE,
 } from './replicationInput';
 export type { ReplicationCreateInput, ReplicationPatchInput, ReplicationAuthKind, ReplicationTargetKind } from './replicationInput';
 export type { ReplicationMode } from './VolumeReplicationService';

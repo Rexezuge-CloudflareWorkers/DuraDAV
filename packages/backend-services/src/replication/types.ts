@@ -11,7 +11,19 @@
  * the comparisons it relies on in `evidence`.
  */
 
-type ReplicationMode = 'copy-only' | 'sync' | 'keep-both';
+/**
+ * How a path both sides changed is reconciled, and in which direction changes flow
+ * at all. The mode is the whole conflict policy — there is no separate direction
+ * setting, because "never imports" and "always wins" have to be one decision.
+ *
+ * - `copy-only`  — Durable-DAV is the sole writer. The remote is a mirror.
+ * - `sync`       — both directions; a genuine conflict resolves by `mtime`.
+ * - `keep-both`  — both directions; a conflict never overwrites, it writes a sibling
+ *                  copy and records the row.
+ * - `pull-only`  — the *remote* is the sole writer. The mirror image of
+ *                  `copy-only`, and the one mode in which nothing is ever pushed.
+ */
+type ReplicationMode = 'copy-only' | 'sync' | 'keep-both' | 'pull-only';
 
 type PlanSide = {
   path: string;
@@ -59,6 +71,17 @@ type ReplicationDecision =
   Both sides changed. `conflictPath` is where the losing side is preserved.
   */
   | { kind: 'keep-both'; path: string; winner: 'local' | 'remote'; conflictPath: string }
+  /**
+  * `pull-only` only: the remote's version wins, and the local version that would
+  * have been overwritten is preserved at `conflictPath` **on the local side**.
+  *
+  * A distinct kind rather than `keep-both` with `winner: 'remote'`, because
+  * `PlanExecutor.keepBoth` writes the loser's bytes into *both* sides' conflict
+  * slots — and under `pull-only` the remote must never be written at all. Reusing
+  * the existing kind would push a local edit to a target whose whole definition is
+  * that it is not written to.
+  */
+  | { kind: 'pull-and-preserve'; path: string; conflictPath: string; contentType: string | null }
   /**
   Sizes match but the validators do not; the runner hashes before deciding.
   */
@@ -132,6 +155,21 @@ type BuildPlanInput = {
    * prevent.
    */
   hashOnAmbiguous?: boolean;
+  /**
+   * `pull-only` only: may a local path the remote does not have be removed locally?
+   *
+   * `false` — the default, and every pre-0007 row — is the safe copy: the remote's
+   * content is imported and kept current, and nothing local is ever destroyed.
+   * `true` is an exact mirror, and every deletion it authorizes flows through the
+   * same `trustAbsences` gate and the same `pass_started_at` gate as a two-way
+   * deletion, so an incomplete listing cannot activate it either.
+   *
+   * Ignored in every other mode. `copy-only` already propagates local deletions to
+   * the remote and `sync`/`keep-both` propagate in both directions, so there is
+   * nothing here to add — and the service refuses `true` on those modes rather than
+   * storing a flag that would mean nothing.
+   */
+  mirrorDeletions?: boolean;
   now?: number;
 };
 

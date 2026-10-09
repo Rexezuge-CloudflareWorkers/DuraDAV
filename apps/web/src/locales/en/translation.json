@@ -225,7 +225,8 @@
     "mode": {
       "keep-both": "Keep Both Copies",
       "sync": "Two-Way Sync",
-      "copy-only": "Copy Only"
+      "copy-only": "Copy Only",
+      "pull-only": "Pull Only (Import)"
     },
     "interval": "Interval",
     "every": "Every {{interval}}",
@@ -254,6 +255,13 @@
     "thisBucket": "This Bucket",
     "remote": "Remote",
     "hideDecisions": "Hide",
-    "noDecisions": "Nothing To Reconcile."
+    "noDecisions": "Nothing To Reconcile.",
+    "modeHelp": {
+      "pullOnly": "One Way: The Remote Is The Only Writer. Changes Here Are Never Sent Back. A Local Version That Would Be Replaced Is Saved Beside It First."
+    },
+    "mirrorDeletions": "Delete Files Here That The Remote Does Not Have",
+    "mirrorDeletionsHelp": "Off, This Bucket Is A Safe Copy: The Remote’s Files Are Imported, And Nothing Here Is Ever Deleted. On, It Becomes An Exact Mirror — Off, Only After A Sync Pass Finishes Without Errors.",
+    "exactMirror": "Exact Mirror",
+    "safeCopy": "Safe Copy"
   }
 }

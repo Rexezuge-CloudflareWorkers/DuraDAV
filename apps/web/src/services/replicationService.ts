@@ -12,6 +12,17 @@ import { apiDelete, apiGet, apiPatch, apiPost } from '../lib/api';
 export const REPLICATION_INTERVALS = [15, 60, 360, 720, 1440, 10_080] as const;
 
 /**
+ * The modes the UI offers, mirroring the server's `REPLICATION_MODES`.
+ *
+ * `pull-only` is the one-way import: the remote is the authority, nothing is ever
+ * pushed, and — with `mirrorDeletions` — local paths the remote lacks are removed
+ * rather than kept.
+ */
+export const REPLICATION_MODES = ['keep-both', 'sync', 'pull-only', 'copy-only'] as const;
+
+export type ReplicationMode = (typeof REPLICATION_MODES)[number];
+
+/**
 Human label for an interval. Minutes under an hour, then hours/days.
 */
 export function intervalLabel(minutes: number): string {
@@ -56,7 +67,13 @@ export type CreateReplicationInput = {
   authKind: 'none' | 'basic' | 'bearer';
   username?: string;
   secret?: string;
-  mode: 'copy-only' | 'sync' | 'keep-both';
+  mode: ReplicationMode;
+  /**
+   * `pull-only` only: delete local paths the remote does not have, making this an
+   * exact mirror rather than a safe copy. Omitted for every other mode — the server
+   * refuses it there, so sending it is a 400 rather than a no-op.
+   */
+  mirrorDeletions?: boolean;
   intervalMinutes: number;
   enabled?: boolean;
 };
@@ -70,7 +87,7 @@ export async function updateReplication(
   owner: string,
   volume: string,
   replicationId: string,
-  patch: { mode?: 'copy-only' | 'sync' | 'keep-both'; intervalMinutes?: number; enabled?: boolean },
+  patch: { mode?: ReplicationMode; mirrorDeletions?: boolean; intervalMinutes?: number; enabled?: boolean },
 ): Promise<BucketReplication> {
   const data = await apiPatch<{ replication: BucketReplication }>(
     `${replicationBase(owner, volume)}/${encodeURIComponent(replicationId)}`,

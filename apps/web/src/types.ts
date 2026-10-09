@@ -103,7 +103,13 @@ export interface BucketReplication {
   remoteVolume: string;
   remotePath: string;
   authKind: 'none' | 'basic' | 'bearer';
-  mode: 'copy-only' | 'sync' | 'keep-both';
+  mode: 'copy-only' | 'sync' | 'keep-both' | 'pull-only';
+  /**
+   * `pull-only` only. `true` makes this an exact mirror — a local path the remote
+   * does not have is deleted — and `false` (the default) is a safe copy, where the
+   * remote's content is imported and nothing local is ever destroyed.
+   */
+  mirrorDeletions: boolean;
   intervalMinutes: number;
   enabled: boolean;
   lastRunAt: number | null;

@@ -20,6 +20,7 @@ function toReplicationJson(row: {
   remote_path: string;
   auth_kind: string;
   mode: string;
+  mirror_deletions: number;
   interval_minutes: number;
   enabled: number;
   last_run_at: number | null;
@@ -41,6 +42,9 @@ function toReplicationJson(row: {
     remotePath: row.remote_path,
     authKind: row.auth_kind,
     mode: row.mode,
+    // Only meaningful for 'pull-only', and always sent so the client can render the
+    // state it is in rather than inferring it from an absent field.
+    mirrorDeletions: row.mirror_deletions === 1,
     intervalMinutes: row.interval_minutes,
     enabled: row.enabled === 1,
     lastRunAt: row.last_run_at,
