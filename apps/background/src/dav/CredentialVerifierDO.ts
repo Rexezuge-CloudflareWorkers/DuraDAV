@@ -152,8 +152,14 @@ class CredentialVerifierDO extends DurableObject<Env> {
     const pending = this.inflight.get(key);
     if (pending) {
       const settled = await pending.catch(() => null);
+      // Trust the settled verdict. Re-reading the cache here could report
+      // `ok: false` for a credential that just verified — the entry can have
+      // been evicted by `MAX_CACHE_ENTRIES` other credentials, or expired on a
+      // very low `CREDENTIAL_MEMO_TTL_SECONDS`, between the two reads. That is
+      // a 401 for a valid password on the one path whose stated purpose is to
+      // never lock a valid credential out.
       if (settled?.ok) {
-        return ({ ok: this.cache.get(key, passwordHash, Date.now()) ? true : false, needsRehash: false, upgradedHash: null });
+        return { ok: true, needsRehash: false, upgradedHash: null };
       }
     }
     const run = this.derive(key, password, passwordHash);

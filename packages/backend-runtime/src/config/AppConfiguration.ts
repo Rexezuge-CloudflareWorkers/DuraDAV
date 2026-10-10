@@ -71,6 +71,14 @@ class AppConfiguration {
     return this.replication.getReplicationAllowedHosts();
   }
 
+  /**
+   * The same allowlist, parsed. See `ReplicationConfig.getReplicationAllowedHostList`
+   * for why there is exactly one parse.
+   */
+  public getReplicationAllowedHostList(): readonly string[] {
+    return this.replication.getReplicationAllowedHostList();
+  }
+
   public isReplicationHashOnAmbiguous(): boolean {
     return this.replication.isReplicationHashOnAmbiguous();
   }
@@ -183,6 +191,15 @@ class AppConfiguration {
     if (this.getEnvironment() === 'production' && this.getReplicationAllowedHosts().trim() !== '') {
       warnings.push(
         'Security: REPLICATION_ALLOWED_HOSTS is set while ENVIRONMENT=production. It exempts the listed hosts from the egress policy that blocks loopback and private-network targets — confirm every entry is intended.',
+      );
+    }
+    // The replication key must come from Secrets Store in production. The plain
+    // var is refused there at use time (so a misconfigured deployment fails
+    // rather than silently falling back), but warning at startup turns "every
+    // credential-bearing replication fails" into a configuration fix.
+    if (this.getEnvironment() === 'production' && EnvParser.string(this.env, 'REPLICATION_ENCRYPTION_KEY', '') !== '') {
+      warnings.push(
+        'Security: REPLICATION_ENCRYPTION_KEY is set while ENVIRONMENT=production. The plain var is ignored there by design — configure the REPLICATION_ENCRYPTION_KEY_SECRET Secrets Store binding instead.',
       );
     }
     return warnings;

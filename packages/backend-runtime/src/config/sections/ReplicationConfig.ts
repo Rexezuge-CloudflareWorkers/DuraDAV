@@ -96,6 +96,25 @@ class ReplicationConfig {
   }
 
   /**
+   * `getReplicationAllowedHosts` parsed into the list the egress policy compares against.
+   *
+   * This parse lived in two places — the service that validates a target and the
+   * builder that connects to one — and they are byte-identical. Both matter: the
+   * validation copy decides whether a target is accepted at all, the connect copy
+   * decides whether it is actually reachable, and a pair that can drift is an
+   * allowlist with two definitions.
+   *
+   * Empty entries are dropped so a trailing comma cannot produce an entry that
+   * matches the empty hostname.
+   */
+  public getReplicationAllowedHostList(): readonly string[] {
+    return this.getReplicationAllowedHosts()
+      .split(',')
+      .map((entry) => entry.trim())
+      .filter((entry) => entry !== '');
+  }
+
+  /**
    * Hash both sides when their validators disagree but their sizes match.
    *
    * Off by default: it costs two full reads per ambiguous file on every pass,

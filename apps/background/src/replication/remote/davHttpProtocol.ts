@@ -1,4 +1,5 @@
 import { RemoteUrlRejectedError } from '@durable-dav/shared/net';
+import { bytesToBase64 } from '@durable-dav/shared/utils';
 import { stripSlashes as trimSlashes } from '@durable-dav/webdav';
 
 /**
@@ -98,11 +99,10 @@ function basicAuthValue(username: string, password: string): string {
   if (username.includes(':')) {
     throw new RemoteUrlRejectedError('replication username must not contain a colon');
   }
-  const raw = `${username}:${password}`;
-  let binary = '';
-  const bytes = new TextEncoder().encode(raw);
-  for (const byte of bytes) binary += String.fromCodePoint(byte);
-  return btoa(binary);
+  // The shared codec rather than the `String.fromCodePoint` + `btoa` form this
+  // used to build — a third copy of the accumulation `Base64.ts` documents as
+  // allocating ~2× the input as UTF-16.
+  return bytesToBase64(new TextEncoder().encode(`${username}:${password}`));
 }
 
 export {

@@ -152,8 +152,23 @@
     // REPLICATION_ENCRYPTION_KEY is a *secret*, not a var, and so is absent here
     // on purpose. It is required to store a remote target's credential: the
     // Worker must present that password on every sync, so unlike a bucket
-    // credential it cannot be a one-way hash. Generate with
-    // `generateReplicationKey()` and `wrangler secret put REPLICATION_ENCRYPTION_KEY`.
+    // credential it cannot be a one-way hash. It is read from the Secrets Store
+    // binding below; generate the value with `generateReplicationKey()` and set
+    // it with `wrangler secret put` against the named store.
     "REPLICATION_ALLOWED_HOSTS": "",
   },
+  "secrets_store_secrets": [
+    {
+      // The replication envelope key: encrypts a remote target's credential at
+      // rest in `dav_replications`. Read through `resolveReplicationKey`, which
+      // falls back to the plain `REPLICATION_ENCRYPTION_KEY` var for local dev
+      // and tests and refuses that fallback in production.
+      //
+      // `store_id` is a placeholder; replace it with the real store before
+      // deploying with replication enabled.
+      "binding": "REPLICATION_ENCRYPTION_KEY_SECRET",
+      "store_id": "00000000000000000000000000000000",
+      "secret_name": "durable-dav-replication-encryption-key",
+    },
+  ],
 }

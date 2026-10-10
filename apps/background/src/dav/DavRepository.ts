@@ -2,6 +2,7 @@
 import { deleteNodeCascade, getDeadProperties, renameNodeCascade, upsertDeadProperty, upsertNode } from '@durable-dav/dav-store';
 import type { DirEntry as DofsChildEntry, DofsFs, DurableSqlStorage } from '@durable-dav/dav-store';
 import type { DavNodeInfo, LockDetails } from '@durable-dav/webdav';
+import { ErrorSanitizationUtil } from '@durable-dav/shared/utils';
 import { hrefOf } from './DavContext';
 import { DavLockGuard } from './DavLockGuard';
 import { lockDetailsFromRow } from './lockRows';
@@ -141,7 +142,7 @@ class DavRepository {
       // will attempt a write and be refused, which is worse than a 500.
       console.error('nodeInfo lock lookup failed', {
         path: innerPath,
-        error: error instanceof Error ? (error.stack ?? error.message) : error,
+        error: ErrorSanitizationUtil.stackForLog(error),
       });
       throw error;
     }

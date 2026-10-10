@@ -4,6 +4,7 @@ import { createDofsFs, setDofsDeviceSize, ensureDavSchema } from '@durable-dav/d
 import type { DofsFs, DurableSqlStorage } from '@durable-dav/dav-store';
 import type { ReplicaStateRow } from '@durable-dav/dav-store';
 import { DAV_CLASS, SUPPORT_METHODS } from '@durable-dav/webdav';
+import { ErrorSanitizationUtil } from '@durable-dav/shared/utils';
 import { AppConfiguration } from '@durable-dav/backend-runtime/config';
 import { DavRepository } from './dav/DavRepository';
 import { DavLockGuard } from './dav/DavLockGuard';
@@ -68,7 +69,7 @@ class DavVolumeWorker extends DurableObject<Env> {
       this.sizeEnsured = true;
     } catch (error) {
       console.error('dofs device size could not be applied; volume quota may be unenforced', {
-        error: error instanceof Error ? (error.stack ?? error.message) : error,
+        error: ErrorSanitizationUtil.stackForLog(error),
       });
     }
   }
@@ -116,7 +117,7 @@ class DavVolumeWorker extends DurableObject<Env> {
       console.error('DavVolumeWorker request failed', {
         method: request.method,
         url: request.url,
-        error: error instanceof Error ? (error.stack ?? error.message) : error,
+        error: ErrorSanitizationUtil.stackForLog(error),
       });
       return new Response('Internal Server Error', {
         status: 500,

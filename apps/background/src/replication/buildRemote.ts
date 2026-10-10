@@ -1,4 +1,4 @@
-import { decryptReplicationSecret } from '@durable-dav/backend-data/crypto';
+import { decryptReplicationSecret, resolveReplicationKey } from '@durable-dav/backend-data/crypto';
 import type { DavReplicationRow } from '@durable-dav/backend-data/dao';
 import { RemoteUnavailableError } from '@durable-dav/backend-services/replication';
 import type { RemoteVolume } from '@durable-dav/backend-services/replication';
@@ -35,11 +35,7 @@ type BuildRemoteOptions = {
  * Never from the request body — an allowlist a caller can extend is not an allowlist.
  */
 function allowedHosts(config: AppConfiguration): string[] {
-  return config
-    .getReplicationAllowedHosts()
-    .split(',')
-    .map((entry) => entry.trim())
-    .filter((entry) => entry !== '');
+  return [...config.getReplicationAllowedHostList()];
 }
 
 /**
@@ -57,7 +53,13 @@ function authHeader(authKind: string, secret: string): RemoteAuth {
 }
 
 async function decryptSecret(env: Env, row: DavReplicationRow): Promise<string> {
-  return row.encrypted_secret === null || row.secret_iv === null ? '' : decryptReplicationSecret({ ciphertext: row.encrypted_secret, iv: row.secret_iv }, env.REPLICATION_ENCRYPTION_KEY);
+  if (row.encrypted_secret === null || row.secret_iv === null) return '';
+  const key = await resolveReplicationKey({
+    binding: env.REPLICATION_ENCRYPTION_KEY_SECRET,
+    rawVar: env.REPLICATION_ENCRYPTION_KEY,
+    isProduction: env.ENVIRONMENT === 'production',
+  })();
+  return decryptReplicationSecret({ ciphertext: row.encrypted_secret, iv: row.secret_iv }, key);
 }
 
 /**

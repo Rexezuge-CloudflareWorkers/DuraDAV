@@ -15,8 +15,6 @@ const badgeVariants = cva('inline-flex items-center px-2 py-0.5 rounded-md text-
   defaultVariants: { variant: 'neutral' },
 });
 
-export type BadgeVariant = NonNullable<VariantProps<typeof badgeVariants>['variant']>;
-
 export function Badge({
   className,
   variant,

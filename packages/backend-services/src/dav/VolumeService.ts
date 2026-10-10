@@ -110,12 +110,17 @@ class VolumeService {
    * username bootstrap had not completed yet, let an authenticated caller create
    * buckets in *any* user's namespace. A missing account is now an error, not a
    * bypass.
+   *
+   * Still fail-closed, but the two failures are kept apart. `null` means "no
+   * account" and is a 404. A `DatabaseError` is an outage and must not be folded
+   * into that same 404, which told the caller to sign in again for a transient
+   * D1 failure. `resolveAccount` already degrades only on
+   * `isMissingSchemaError` and rethrows everything else, so letting it propagate
+   * reaches `toErrorResponse`, which answers 503 — and an exception here still
+   * creates no bucket.
    */
   public async requireCallerAccount(email: string): Promise<ResolvedAccount> {
-    const account = await this.deps
-      .identity()
-      .then((identity) => identity.resolveAccount(email))
-      .catch(() => null);
+    const account = await this.deps.identity().then((identity) => identity.resolveAccount(email));
     if (!account) throw new NotFoundError('No account is provisioned for this address; sign in again to provision one');
     return account;
   }

@@ -3,7 +3,8 @@ import { TimestampUtil, UUIDUtil } from '@durable-dav/shared/utils';
 import type { D1Queryable } from '@durable-dav/backend-data/utils';
 import { DavReplicationConflictDAO, DavReplicationDAO } from '@durable-dav/backend-data/dao';
 import type { DavReplicationConflictRow, DavReplicationRow, ReplicationTarget } from '@durable-dav/backend-data/dao';
-import { encryptReplicationSecret } from '@durable-dav/backend-data/crypto';
+import { encryptReplicationSecret, resolveReplicationKey } from '@durable-dav/backend-data/crypto';
+import type { ReplicationKeyProvider, SecretsStoreKeyBinding } from '@durable-dav/backend-data/crypto';
 import type { ReplicationMode } from '../replication/types';
 import { AppConfiguration } from '@durable-dav/backend-runtime/config';
 import {
@@ -25,6 +26,17 @@ import type { ReplicationAuthKind, ReplicationCreateInput, ReplicationPatchInput
 
 interface VolumeReplicationServiceEnv {
   DB: D1Queryable;
+  /**
+   * `secrets_store_secrets` binding — the preferred source for the key.
+   *
+   * Read through `resolveReplicationKey` rather than as a string, so the key
+   * never sits in the Worker environment and is fetched at most once per
+   * instance. See `backend-data/src/crypto/replicationKey.ts`.
+   */
+  REPLICATION_ENCRYPTION_KEY_SECRET?: SecretsStoreKeyBinding;
+  /**
+  Plain-var fallback for local dev and tests. Refused in production.
+  */
   REPLICATION_ENCRYPTION_KEY?: string;
 }
 
@@ -45,6 +57,15 @@ interface VolumeReplicationServiceDeps {
 class VolumeReplicationService {
   private readonly deps: Required<VolumeReplicationServiceDeps>;
 
+  /**
+   * One memoized key source per service instance.
+   *
+   * Resolved in the constructor rather than per `seal()` call so a create/patch
+   * that seals once does not re-fetch, and so the fetch failure is reported the
+   * same way every time.
+   */
+  private readonly replicationKey: ReplicationKeyProvider;
+
   constructor(
     private readonly env: VolumeReplicationServiceEnv,
     deps: VolumeReplicationServiceDeps = {},
@@ -54,6 +75,13 @@ class VolumeReplicationService {
       conflictDAO: deps.conflictDAO ?? (() => Promise.resolve(new DavReplicationConflictDAO(env.DB))),
       config: deps.config ?? AppConfiguration.fromEnv(env),
     };
+    this.replicationKey = resolveReplicationKey({
+      binding: env.REPLICATION_ENCRYPTION_KEY_SECRET,
+      rawVar: env.REPLICATION_ENCRYPTION_KEY,
+      // The service already holds a resolved `AppConfiguration`; asking it
+      // rather than reading the env keeps the production rule in one place.
+      isProduction: this.deps.config.getEnvironment() === 'production',
+    });
   }
 
   /**
@@ -250,15 +278,11 @@ class VolumeReplicationService {
    * allowlist.
    */
   public allowedHosts(): string[] {
-    return this.deps.config
-      .getReplicationAllowedHosts()
-      .split(',')
-      .map((entry) => entry.trim())
-      .filter((entry) => entry !== '');
+    return [...this.deps.config.getReplicationAllowedHostList()];
   }
 
   private async seal(secret: string): Promise<{ ciphertext: string; iv: string }> {
-    const envelope = await encryptReplicationSecret(secret, this.env.REPLICATION_ENCRYPTION_KEY);
+    const envelope = await encryptReplicationSecret(secret, await this.replicationKey());
     return { ciphertext: envelope.ciphertext, iv: envelope.iv };
   }
 }

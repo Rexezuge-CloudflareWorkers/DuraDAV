@@ -33,8 +33,18 @@ declare global {
     credential it cannot be a one-way hash. Absent means replications with a
     credential cannot be created, and the failure is reported rather than
     silently storing the secret in the clear.
+
+    Superseded by `REPLICATION_ENCRYPTION_KEY_SECRET` (a Secrets Store binding),
+    which is preferred everywhere and the only source used in production. This
+    plain var remains for local dev and unit tests, where no Secrets Store is
+    provisioned; `resolveReplicationKey` refuses it when
+    `ENVIRONMENT=production`, so the two cannot silently trade places.
     */
     REPLICATION_ENCRYPTION_KEY?: string;
+    /**
+    `secrets_store_secrets` binding holding base64 of 32 bytes.
+    */
+    REPLICATION_ENCRYPTION_KEY_SECRET?: SecretsStoreSecret;
     REPLICATION_ALLOWED_HOSTS?: string;
     REPLICATION_SWEEP_LIMIT?: string;
     REPLICATION_SLICE_PATHS?: string;

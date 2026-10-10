@@ -154,7 +154,7 @@ function unlink(dofs: DofsFs, sql: DurableSqlStorage, repo: DavRepository, path:
  * conflict copy of a single file — a use that reaches the size cap should
  * report that rather than allocate a gigabyte inside a Durable Object.
  */
-function copy(dofs: DofsFs, sql: DurableSqlStorage, repo: DavRepository, from: string, to: string): void {
+async function copy(dofs: DofsFs, sql: DurableSqlStorage, repo: DavRepository, from: string, to: string): Promise<void> {
   if (from === '' || to === '' || !isValidInnerPath(from) || !isValidInnerPath(to)) {
     throw new Error(`replication copy: invalid paths ${JSON.stringify(from)} -> ${JSON.stringify(to)}`);
   }
@@ -172,7 +172,11 @@ function copy(dofs: DofsFs, sql: DurableSqlStorage, repo: DavRepository, from: s
   }
   const bytes = new Uint8Array(dofs.read(fsPathOf(from), {}).slice(0));
   mkdir(dofs, repo, getParentPath(to));
-  void dofs.writeFile(fsPathOf(to), bytes.slice().buffer, {});
+  // Awaited. This was `void dofs.writeFile(...)`, so the caller continued to
+  // write the metadata row and then to record a base state for a file whose
+  // bytes were not yet durable: evict the DO in between and the base row says
+  // the two sides agree about a file that does not exist.
+  await dofs.writeFile(fsPathOf(to), bytes.slice().buffer, {});
   const now = Date.now();
   repo.upsertFileNode(to, meta.contentType ?? 'application/octet-stream', `"${bytes.byteLength.toString(16)}-${now.toString(16)}"`, now);
 }

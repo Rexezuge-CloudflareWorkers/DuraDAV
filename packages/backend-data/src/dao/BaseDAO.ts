@@ -70,7 +70,10 @@ abstract class BaseDAO {
           await sleep(d1BackoffMs(D1_RETRY_DEFAULTS.baseDelayMs, attempt));
           continue;
         }
-        throw new DatabaseError(`Failed to ${context}: ${message}`, retryable);
+        // `cause` is carried, not just the message: without it every caller
+        // downstream has an `error.message` that reads
+        // "Failed to <context>: D1_ERROR: ..." and no stack to go with it.
+        throw new DatabaseError(`Failed to ${context}: ${message}`, retryable, { cause: error });
       }
     }
     throw new DatabaseError(`Failed to ${context} after ${D1_RETRY_DEFAULTS.maxRetries + 1} attempts`);
