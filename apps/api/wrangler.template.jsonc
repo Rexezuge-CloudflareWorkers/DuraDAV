@@ -153,8 +153,13 @@
     // on purpose. It is required to store a remote target's credential: the
     // Worker must present that password on every sync, so unlike a bucket
     // credential it cannot be a one-way hash. It is read from the Secrets Store
-    // binding below; generate the value with `generateReplicationKey()` and set
-    // it with `wrangler secret put` against the named store.
+    // binding below.
+    //
+    // The value is provisioned, not configured: `scripts/init-secrets.ts` runs on
+    // every deploy, generating a `generateReplicationKey()` value with
+    // `wrangler secrets-store secret create` if — and only if — the secret is
+    // not already there. It is never rotated, because it seals every stored
+    // remote credential; see that script for why redeploying must not replace it.
     "REPLICATION_ALLOWED_HOSTS": "",
   },
   "secrets_store_secrets": [

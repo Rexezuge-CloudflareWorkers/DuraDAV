@@ -117,12 +117,16 @@ export function listSecretStores(): SecretStore[] {
 }
 
 export function ensureSecretStore(): string {
-  let stores = listSecretStores();
-  if (stores.length > 0) {
-    const store = stores.find((candidate) => candidate.name === DEFAULT_SECRET_STORE_NAME) ?? stores[0];
-    return store.id;
+  const existing = listSecretStores().find((candidate) => candidate.name === DEFAULT_SECRET_STORE_NAME);
+  if (existing) {
+    return existing.id;
   }
 
+  // Deliberately not `?? stores[0]`. An account holding several stores and none
+  // named `default` would otherwise have had its Worker bound to whichever
+  // happened to sort first — so the replication key would land in an unrelated
+  // store, and the store_id in the config would not be reproducible from the
+  // config alone. Creating a named store is the only predictable answer.
   console.log(`Creating Secrets Store: ${DEFAULT_SECRET_STORE_NAME}`);
   const output = runWrangler(['secrets-store', 'store', 'create', DEFAULT_SECRET_STORE_NAME, '--remote']);
   const createdStoreId = output.match(/ID:\s*([a-f0-9]{32})/i)?.[1];
@@ -130,12 +134,11 @@ export function ensureSecretStore(): string {
     return createdStoreId;
   }
 
-  stores = listSecretStores();
-  const store = stores.find((candidate) => candidate.name === DEFAULT_SECRET_STORE_NAME) ?? stores[0];
-  if (!store?.id) {
+  const created = listSecretStores().find((candidate) => candidate.name === DEFAULT_SECRET_STORE_NAME);
+  if (!created?.id) {
     throw new Error(`Unable to discover Secrets Store ID for ${DEFAULT_SECRET_STORE_NAME}.`);
   }
-  return store.id;
+  return created.id;
 }
 
 export function ensureQueue(queueName: string): void {
