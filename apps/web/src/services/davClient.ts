@@ -1,5 +1,5 @@
 import type { DavEntry } from '../types';
-import { BackendError, readDav } from '../lib/api';
+import { BackendError, extractErrorMessage, readDav } from '../lib/api';
 import { parseMultistatus, stripSlashes } from '../lib/davXml';
 import { DEFAULT_PAGE_SIZE } from '../lib/davPage';
 
@@ -42,16 +42,12 @@ async function davFetch(url: string, init: RequestInit): Promise<Response> {
   if (response.status === 207) return response;
   if (!response.ok) {
     const text = await response.text().catch(() => '');
-    let type: string | null = null;
-    let message = text || `HTTP ${response.status}`;
-    try {
-      const data = JSON.parse(text) as { Exception?: { Type?: string; Message?: string } };
-      if (typeof data?.Exception?.Type === 'string') type = data.Exception.Type;
-      if (typeof data?.Exception?.Message === 'string' && data.Exception.Message) message = data.Exception.Message;
-    } catch {
-      // Plain-text WebDAV errors surface as-is (truncated).
-      message = message.length > 500 ? `${message.slice(0, 500)}…` : message;
-    }
+    // The shared parser rather than a second implementation. This one knew
+    // only the AWS `Exception` envelope, so a legacy `{error, message}` body
+    // from a WebDAV endpoint produced a raw JSON string as the error text and a
+    // `null` type — losing the specific localized wording that the rest of the
+    // SPA resolves. One error shape, parsed once.
+    const { message, type } = extractErrorMessage(text, response.status);
     throw new BackendError(message, type, response.status);
   }
   // Callers of the mutating helpers discard the response entirely. An unread

@@ -3,6 +3,7 @@ import { fromHono } from 'chanfana';
 import type { HonoOpenAPIRouterType } from 'chanfana';
 import { Hono } from 'hono';
 import { AppConfiguration } from '@durable-dav/backend-runtime/config';
+import { ErrorSanitizationUtil } from '@durable-dav/shared/utils';
 import type { Next } from 'hono';
 import { MiddlewareHandlers, registerRateLimits, securityHeaders } from '@/middleware';
 import type { ApiContext, ApiEnv } from '@/types/ApiContext';
@@ -41,7 +42,7 @@ class DurableDavWorker extends AbstractEntrypointWorker {
 
     app.use('*', securityHeaders());
     app.onError((error, c) => {
-      console.error('Unhandled worker error', error instanceof Error ? (error.stack ?? error.message) : error);
+      console.error('Unhandled worker error', ErrorSanitizationUtil.stackForLog(error));
       return c.json({ Exception: { Type: 'InternalServerError', Message: 'Internal Server Error.' } }, 500);
     });
 

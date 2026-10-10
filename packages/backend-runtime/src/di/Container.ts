@@ -8,7 +8,7 @@ type Token<T = unknown> = (string | symbol) & { readonly __type?: T };
 /**
  * Minimal dependency-injection container (Factory + Singleton scopes).
  *
- * Composition roots (`createRequestScope`, `RepoWorkerFactory`, tests) wire
+ * Composition roots (`createRequestScope`, `CronTasksWorker`, tests) wire
  * concrete implementations once; handlers resolve via `scope.get(Tokens.X)`.
  * Prefer constructor injection of `I*` ports at registration time over
  * inline `scope.get()` in business logic.

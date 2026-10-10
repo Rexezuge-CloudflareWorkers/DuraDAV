@@ -1,4 +1,4 @@
-import { buildReplicationPlan } from '@durable-dav/backend-services/replication';
+import { buildReplicationPlan, errorMessageOf, truncateReplicationError } from '@durable-dav/backend-services/replication';
 import type { ReplicationMode } from '@durable-dav/backend-services/replication';
 import { DavReplicationConflictDAO, DavReplicationDAO } from '@durable-dav/backend-data/dao';
 import type { DavReplicationRow } from '@durable-dav/backend-data/dao';
@@ -15,8 +15,6 @@ import { buildRemote, siblingVolumeKey } from './buildRemote';
 
 const logger = createLogger('Replication');
 
-const MAX_ERROR_LENGTH = 500;
-
 type RunResult = {
   status: 'ok' | 'partial' | 'failed';
   error: string | null;
@@ -31,8 +29,13 @@ type RunResult = {
 };
 
 interface ReplicationRunnerDeps {
-  replicationDAO?: DavReplicationDAO;
-  conflictDAO?: DavReplicationConflictDAO;
+  /**
+   Required. Both DAOs must come from the request scope: a runner that
+   constructed its own would write conflict-audit rows through a second, unscoped
+   data path that no test or transaction can observe.
+   */
+  replicationDAO: DavReplicationDAO;
+  conflictDAO: DavReplicationConflictDAO;
   /**
   Injected in tests; defaults to the platform `fetch`.
   */
@@ -85,12 +88,18 @@ class ReplicationRunner {
     private readonly localOwner: string,
     private readonly localVolume: string,
     localStub: LocalReplicaStub,
-    deps: ReplicationRunnerDeps = {},
+    deps: ReplicationRunnerDeps,
   ) {
     this.config = AppConfiguration.fromEnv(env);
     this.localStub = localStub;
-    this.replicationDAO = deps.replicationDAO ?? new DavReplicationDAO(env.DB);
-    this.conflictDAO = deps.conflictDAO ?? new DavReplicationConflictDAO(env.DB);
+    // Required, not defaulted. The `?? new DavReplicationDAO(env.DB)` fallbacks
+    // existed because the API route once forgot to pass them — and the symptom
+    // was invisible: the run succeeded and the conflict-audit rows were written
+    // by a DAO that never passed through the request scope. Every caller now
+    // supplies both, so a missing one is a type error instead of a silent
+    // second data path.
+    this.replicationDAO = deps.replicationDAO;
+    this.conflictDAO = deps.conflictDAO;
     this.fetchImpl = deps.fetchImpl ?? ((input, init) => fetch(input, init));
   }
 
@@ -306,8 +315,7 @@ class ReplicationRunner {
 }
 
 function truncateToRow(error: unknown): string {
-  const message = error instanceof Error ? error.message : String(error);
-  return message.length > MAX_ERROR_LENGTH ? message.slice(0, MAX_ERROR_LENGTH) : message;
+  return truncateReplicationError(errorMessageOf(error));
 }
 
 export { ReplicationRunner };

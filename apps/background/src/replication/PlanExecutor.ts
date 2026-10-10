@@ -1,6 +1,7 @@
 import { createLogger } from '@durable-dav/backend-runtime/logger';
 
 import type { ReplicationDecision, RemoteVolume } from '@durable-dav/backend-services/replication';
+import { truncateReplicationReason } from '@durable-dav/backend-services/replication';
 import { CryptoUtil } from '@durable-dav/shared/utils';
 import type { ReplicaStateRow } from '@durable-dav/dav-store';
 import type { LocalReplicaStub, Slice } from './collectSlice';
@@ -194,8 +195,8 @@ class PlanExecutor {
     if (localBytes === null || remoteStream === null) return null;
     const remoteBytes = new Uint8Array(await new Response(remoteStream).arrayBuffer());
     const [localHash, remoteHash] = await Promise.all([
-      CryptoUtil.sha256Hex(bytesToBinary(localBytes)),
-      CryptoUtil.sha256Hex(bytesToBinary(remoteBytes)),
+      CryptoUtil.sha256HexOfBytes(localBytes),
+      CryptoUtil.sha256HexOfBytes(remoteBytes),
     ]);
     if (localHash === remoteHash) {
       logger.info(`replication content hash matched for ${path}`);
@@ -269,17 +270,8 @@ class PlanExecutor {
   }
 }
 
-function bytesToBinary(bytes: Uint8Array): string {
-  let binary = '';
-  const chunk = 8192;
-  for (let i = 0; i < bytes.length; i += chunk) {
-    binary += String.fromCodePoint(...bytes.subarray(i, i + chunk));
-  }
-  return binary;
-}
-
 function truncate(message: string): string {
-  return message.length > 300 ? message.slice(0, 300) : message;
+  return truncateReplicationReason(message);
 }
 
 export { PlanExecutor, truncate };

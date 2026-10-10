@@ -2,9 +2,6 @@ import { describe, expect, it } from 'vitest';
 import { AppConfiguration } from '../packages/backend-runtime/src/config/AppConfiguration';
 import { EnvParser } from '../packages/backend-runtime/src/config/EnvParser';
 import { checkVolumeQuota, parseVolumePatch } from '../packages/backend-services/src/dav/VolumeCreatePolicy';
-import { deserializeErrorBody, parseErrorPayload } from '../packages/backend-services/src/errors/ErrorDeserializationUtil';
-import { mapServiceError, toServiceStatus } from '../packages/backend-services/src/errors/ErrorMapper';
-import { BadRequestError, DatabaseError } from '../packages/backend-errors';
 
 describe('AppConfiguration hardening', () => {
   it('trims trailing slashes from SITE_URL and reports malformed numerics', () => {
@@ -34,18 +31,17 @@ describe('VolumeCreatePolicy hardening', () => {
   });
 });
 
-describe('Error handling hardening', () => {
-  it('deserializes typed errors and degrades unknown types to 500', () => {
-    expect(deserializeErrorBody({ Exception: { Type: 'NotFound', Message: 'missing' } }, 'fb').getErrorType()).toBe('NotFound');
-    expect(deserializeErrorBody({ Exception: { Type: 'Nope', Message: 'x' } }, 'fb').getErrorType()).toBe('InternalServerError');
-    expect(parseErrorPayload('plain boom', 502).message).toBe('plain boom');
-    expect(parseErrorPayload({ error: 'BadRequest', message: 'bad' }, 400).getErrorType()).toBe('BadRequest');
-  });
-
-  it('maps service errors to HTTP status without leaking internals', () => {
-    expect(toServiceStatus(new BadRequestError('bad'))).toBe(400);
-    const mapped = mapServiceError(new DatabaseError('db down'));
-    expect(mapped.status).toBe(500);
-    expect(mapped.body.Exception?.Type).toBe('DatabaseError');
+// The second error→HTTP mapper that used to live in
+// `packages/backend-services/src/errors/` was removed: it had no production
+// caller, and disagreed with the live one (`BaseRoute.toErrorResponse`) —
+// collapsing every 5xx to 500 where the live path passes a `DatabaseError`'s
+// code through. Keeping a tested-but-unused twin of a security-adjacent mapping
+// is a trap; the assertions that pinned it moved to `error-mapping.test.ts`,
+// against the mapper that actually runs.
+describe('error→HTTP mapping has exactly one implementation', () => {
+  it('exposes no second mapper from backend-services', async () => {
+    const barrel = await import('../packages/backend-services/src/index');
+    expect(barrel).not.toHaveProperty('mapServiceError');
+    expect(barrel).not.toHaveProperty('toServiceStatus');
   });
 });

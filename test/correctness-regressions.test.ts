@@ -80,11 +80,22 @@ describe('VolumeService.createVolume owner check fails closed', () => {
     );
   });
 
-  it('rejects when the account lookup throws', async () => {
+  it('rejects with the underlying error when the account lookup throws', async () => {
+    // Still fails CLOSED — no bucket is created — but the outage now propagates
+    // instead of being flattened into "No account is provisioned; sign in again",
+    // which told the caller to re-authenticate for what was a transient D1
+    // failure. It reaches `toErrorResponse`, which answers 503.
     const svc = service(async () => {
       throw new Error('D1 down');
     });
-    await expect(svc.createVolume({ owner: 'victim', name: 'photos', creatorEmail: 'a@x.co' })).rejects.toThrow(/No account is provisioned/);
+    await expect(svc.createVolume({ owner: 'victim', name: 'photos', creatorEmail: 'a@x.co' })).rejects.toThrow('D1 down');
+  });
+
+  it('rejects a missing account with the provisioning message', async () => {
+    const svc = service(async () => null);
+    await expect(svc.createVolume({ owner: 'victim', name: 'photos', creatorEmail: 'a@x.co' })).rejects.toThrow(
+      /No account is provisioned/,
+    );
   });
 
   it('rejects a mismatched owner', async () => {

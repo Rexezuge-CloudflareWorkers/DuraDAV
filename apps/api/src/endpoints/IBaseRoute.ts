@@ -123,9 +123,14 @@ abstract class BaseRoute {
   public static toErrorResponse(c: HonoContext, error: unknown): Response {
     if (error instanceof DatabaseError) {
       console.error('Caught database error during execution:', ErrorSanitizationUtil.sanitizeErrorForLogging(error));
+      // `retryable` is the only distinction between "try again" and "this will
+      // keep failing", and nothing consulted it: every `DatabaseError` answered
+      // 500. `DavAuth` already answers 503 for the same type, so this aligns the
+      // JSON plane with the DAV plane instead of leaving a retryable outage
+      // indistinguishable from a permanent one.
       return Response.json(
         { Exception: { Type: error.getErrorType(), Message: error.getErrorMessage() } },
-        { status: error.getErrorCode() },
+        { status: error.retryable ? 503 : error.getErrorCode() },
       );
     }
     if (error instanceof ServiceError) {

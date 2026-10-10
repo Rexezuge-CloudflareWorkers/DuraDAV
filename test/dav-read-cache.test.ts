@@ -41,11 +41,9 @@ function makeFakeKv(initial: Record<string, string> = {}): KvNamespaceLike & {
       if (!entry) return Promise.resolve(null);
       if (type === 'arrayBuffer') {
         if (entry.bytes) return Promise.resolve(entry.bytes.slice().buffer as ArrayBuffer);
-        if (entry.text !== undefined) return Promise.resolve(new TextEncoder().encode(entry.text).buffer as ArrayBuffer);
-        return Promise.resolve(null);
+        return entry.text === undefined ? Promise.resolve(null) : Promise.resolve(new TextEncoder().encode(entry.text).buffer as ArrayBuffer);
       }
-      if (entry.text !== undefined) return Promise.resolve(entry.text);
-      return Promise.resolve(null);
+      return entry.text === undefined ? Promise.resolve(null) : Promise.resolve(entry.text);
     },
     getWithMetadata(key: string, type?: string): Promise<{ value: string | ArrayBuffer | null; metadata: unknown }> {
       const entry = store.get(key);

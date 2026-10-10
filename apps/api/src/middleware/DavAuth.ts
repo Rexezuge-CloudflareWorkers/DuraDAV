@@ -5,6 +5,7 @@ import { davErrorResponse } from '@durable-dav/webdav';
 import { verifyCredential } from './credentialVerifier';
 import type { DavHrefPrefixMode } from '@durable-dav/shared/constants';
 import { readDavHrefPrefixMode } from '@durable-dav/shared/constants';
+import { ErrorSanitizationUtil } from '@durable-dav/shared/utils';
 import { DatabaseError } from '@durable-dav/backend-errors';
 import { BaseRoute } from '../endpoints/IBaseRoute';
 
@@ -228,7 +229,7 @@ async function davAuthForVolumeInner(
       await credentialDAO.updatePasswordHash(credential.credentialId, upgradedHash).catch((error: unknown) => {
         console.error('credential rehash failed; credential stays on the legacy digest', {
           credentialId: credential.credentialId,
-          error: error instanceof Error ? (error.stack ?? error.message) : error,
+          error: ErrorSanitizationUtil.stackForLog(error),
         });
       });
     }

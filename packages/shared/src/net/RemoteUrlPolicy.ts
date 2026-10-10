@@ -125,11 +125,19 @@ function isBlockedIpv6(literal: string): boolean {
 /**
  * Does this host name a numeric address in a non-dotted spelling?
  *
- * `http://2130706433/` and `http://0x7f.1/` are loopback written in a form
- * `URL` keeps verbatim in `hostname`, so the dotted-literal check above never
- * sees them. Resolving requires a DNS answer we deliberately do not make, so
- * the safe answer is to refuse every host that is not a plain dotted quad or a
- * bracketed IPv6 literal.
+ * Defence in depth, and — contrary to an earlier version of this comment —
+ * **not reachable through `URL`**. The WHATWG host parser canonicalises every
+ * non-dotted spelling before this runs: `2130706433`, `0x7f.1`, `0177.0.0.1`,
+ * `0x7f000001` and `127.1` all arrive as `127.0.0.1`, and
+ * `0300.0250.0001.0001` as `192.168.1.1`. So `isBlockedIpv4` already refuses
+ * them on the dotted-literal path above, and *that* is what actually stops
+ * them.
+ *
+ * It stays because a host reaching this function need not come from `URL`, and
+ * because a check whose stated premise is false is worse than no check at all:
+ * it invites a reader to reason about the SSRF surface from something that does
+ * not hold. The unresolved gap is DNS rebinding, documented above — this is not
+ * it, and this comment used to read as if it were.
  */
 function looksLikeObfuscatedNumericHost(host: string): boolean {
   if (isIpv4Literal(host) || host.startsWith('[') || !/^[0-9a-fx.]+$/i.test(host)) return false;

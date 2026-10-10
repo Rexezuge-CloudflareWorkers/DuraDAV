@@ -1,5 +1,6 @@
 import type { DurableSqlStorage } from '@durable-dav/dav-store';
 import { upsertDeadProperty } from '@durable-dav/dav-store';
+import { ErrorSanitizationUtil } from '@durable-dav/shared/utils';
 import {
   MAX_XML_BODY_BYTES,
   escapeXml,
@@ -37,7 +38,7 @@ function logPropWriteFailure(innerPath: string, property: DeadProperty, error: u
     path: innerPath,
     namespaceURI: property.namespaceURI,
     localName: property.localName,
-    error: error instanceof Error ? (error.stack ?? error.message) : error,
+    error: ErrorSanitizationUtil.stackForLog(error),
   });
 }
 
@@ -129,7 +130,14 @@ async function handleProppatch(
   const appliedRemoves: DeadProperty[] = [];
   const erroredSets: DeadProperty[] = [];
   const erroredRemoves: DeadProperty[] = [];
-  if (!hasProtectedFailures) {
+  const skippedSets: DeadProperty[] = [];
+  const skippedRemoves: DeadProperty[] = [];
+  if (hasProtectedFailures) {
+    // Not attempted, because a protected property in the same request failed.
+    // Reported as 424 alongside the protected ones rather than dropped.
+    skippedSets.push(...okSets);
+    skippedRemoves.push(...okRemoves);
+  } else {
     for (const p of okSets) {
       try {
         upsertDeadProperty(sql, innerPath, p);
@@ -164,6 +172,12 @@ async function handleProppatch(
   for (const p of failedRemoves) append(p, 'HTTP/1.1 403 Forbidden');
   for (const p of erroredSets) append(p, dependencyStatus);
   for (const p of erroredRemoves) append(p, dependencyStatus);
+  // A protected failure makes the whole update all-or-nothing, which is a
+  // defensible choice — but every *other* property in the request must still be
+  // accounted for. Omitting them left the client unable to tell "rejected" from
+  // "never attempted", and a client that retries would re-send them forever.
+  for (const p of skippedSets) append(p, dependencyStatus);
+  for (const p of skippedRemoves) append(p, dependencyStatus);
   let xml = `<?xml version="1.0" encoding="utf-8"?>\n<multistatus xmlns="DAV:">\n<response>\n<href>${escapeXml(hrefOf(bases.hrefBase, innerPath, node?.isCollection ?? false))}</href>`;
   for (const [status, props] of propstats) {
     // Through the shared renderer: this block was byte-identical to

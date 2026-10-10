@@ -37,7 +37,12 @@ async function handleGet(
   dofs: DofsFs,
 ): Promise<Response> {
   const st = repo.statInner(innerPath);
-  const isBrowserNav = request.url.endsWith('/') || innerPath === '' || st.isDirectory;
+  // `new URL(...).pathname`, not `request.url.endsWith('/')`: the raw URL
+  // includes the query string, so `GET /alice/notes.txt?next=/` read as a
+  // collection request and 404'd a file that exists. This is the same bug
+  // already fixed in `WriteMethods` and `lockPhases` — it was the third of
+  // three call sites, and the only one left.
+  const isBrowserNav = new URL(request.url).pathname.endsWith('/') || innerPath === '' || st.isDirectory;
   if (isBrowserNav) {
     if (innerPath !== '' && (!st.exists || !st.isDirectory)) return new Response('Not Found', { status: 404 });
     if (headOnly) return new Response(null, { status: 200, headers: { 'Content-Type': 'text/html; charset=utf-8' } });

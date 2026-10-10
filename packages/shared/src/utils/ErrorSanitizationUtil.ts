@@ -34,6 +34,21 @@ class ErrorSanitizationUtil {
     }
     return this.sanitizeMessage(String(error));
   }
+
+  /**
+   * A redacted error, for a structured log payload.
+   *
+   * `error instanceof Error ? (error.stack ?? error.message) : error` was
+   * written out at eight call sites, and every one of them bypassed the
+   * redaction above — so an error whose message carried a credential would be
+   * logged in the clear. Those sites are error paths in the DAV plane, which
+   * never see an Access JWT, so no live leak was found; but a logging helper
+   * that only redacts when the caller remembers to call it is not a redaction
+   * boundary.
+   */
+  public static stackForLog(error: unknown): unknown {
+    return this.sanitizeErrorForLogging(error);
+  }
 }
 
 export { ErrorSanitizationUtil };

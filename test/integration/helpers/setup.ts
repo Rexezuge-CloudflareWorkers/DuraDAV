@@ -104,9 +104,6 @@ export async function seedVolume(
   return id;
 }
 
-// Back-compat alias for older helpers.
-export const seedRepo = seedVolume;
-
 async function sha256Hex(text: string): Promise<string> {
   const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(text));
   return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, '0')).join('');
@@ -130,8 +127,4 @@ export async function mintCredentialForVolume(
     .bind(credentialId, volumeId, username, passwordHash, input.name ?? 'test-credential', raw.slice(0, 10), raw.slice(-4), now, expiresAt)
     .run();
   return { credentialId, username, password: raw };
-}
-
-export function basicAuthHeader(username: string, password: string): Record<string, string> {
-  return { Authorization: `Basic ${btoa(`${username}:${password}`)}` };
 }

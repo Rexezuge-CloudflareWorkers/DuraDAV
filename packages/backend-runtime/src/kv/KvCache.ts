@@ -210,6 +210,15 @@ class KvCache {
         }
         if (result.keys.length < PURGE_LIST_LIMIT) return deleted;
       }
+      // The cap was hit with a full page still coming back, so keys remain and
+      // the caller sees a count indistinguishable from a complete purge. A
+      // `PUT`/`DELETE` invalidation that silently under-purges serves
+      // pre-write bytes for a whole TTL while reporting success, so this is
+      // never silent.
+      logger.warn(
+        `KV purge for ${domain} hit the ${PURGE_MAX_PAGES * PURGE_LIST_LIMIT}-key page cap; ` +
+          `at least one key may survive invalidation`,
+      );
     } catch (error) {
       logger.debug(`KV purge failed for ${domain}: ${error instanceof Error ? error.message : String(error)}`);
     }

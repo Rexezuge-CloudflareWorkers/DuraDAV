@@ -5,6 +5,7 @@ import { fsPathOf, isValidInnerPath } from './DavContext';
 import { DavRepository } from './DavRepository';
 import * as ops from './replicaOperations';
 import type { ReplicaEntry } from './replicaOperations';
+import { errorMessageOf, truncateReplicationReason } from '@durable-dav/backend-services/replication';
 
 /**
  * One operation from a replication plan, as the DO applies it.
@@ -57,8 +58,6 @@ type ReplicaApplyResult = {
   */
   error: string | null;
 };
-
-const MAX_REPORTED_ERROR_LENGTH = 300;
 
 /**
  * One collection listing, carrying whether it is complete.
@@ -178,7 +177,7 @@ class VolumeReplicationRpc {
         return;
       }
       case 'copy': {
-        ops.copy(this.dofs, this.sql, repo, operation.from, operation.to);
+        await ops.copy(this.dofs, this.sql, repo, operation.from, operation.to);
         return;
       }
       case 'record': {
@@ -228,8 +227,7 @@ class VolumeReplicationRpc {
       } catch (caught) {
         failed += 1;
         if (error === null) {
-          const message = caught instanceof Error ? caught.message : String(caught);
-          error = message.slice(0, MAX_REPORTED_ERROR_LENGTH);
+          error = truncateReplicationReason(errorMessageOf(caught));
         }
         // Keep going. One unmappable path (a name the remote invented, a file
         // that vanished mid-pass) must not abandon the other 199 in the slice.

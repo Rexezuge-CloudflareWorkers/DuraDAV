@@ -17,7 +17,10 @@ class DavConditionalGuard {
    *
    * Precedence is fixed by RFC 9110 §13.2.2: `If-Match` is evaluated first,
    * then `If-Unmodified-Since` (only when `If-Match` is absent), then
-   * `If-None-Match`.
+   * `If-None-Match`, then `If-Modified-Since` (only when `If-None-Match` is
+   * absent and only for a read). Each step is *skipped by its predecessor*, not
+   * by a short-circuit out of the whole evaluation — a satisfied `If-Match`
+   * continues on to the later three.
    *
    * Weak comparison is used for `If-Match` and strong comparison for
    * `If-None-Match` only if the header says `W/`; in practice WebDAV clients
@@ -36,11 +39,16 @@ class DavConditionalGuard {
       } else if (etag === null || !matchesEtagList(ifMatch, etag)) {
         return preconditionFailed('If-Match');
       }
-      return null;
+      // A *satisfied* `If-Match` must fall through, not short-circuit. It only
+      // skips `If-Unmodified-Since`; `If-None-Match`, `If` and
+      // `If-Modified-Since` are still evaluated. Returning here meant
+      // `If-Match: "<current>"` + `If-None-Match: *` answered 200 with a body
+      // on a read and overwrote on a write, where RFC 9110 §13.2.2 requires
+      // 304 and 412 — and it contradicted the precedence stated above.
     }
 
     const ifUnmodified = request.headers.get('If-Unmodified-Since');
-    if (ifUnmodified !== null && mtime !== null) {
+    if (ifMatch === null && ifUnmodified !== null && mtime !== null) {
       const since = Date.parse(ifUnmodified);
       // Only applies when the client sent a valid date; an unparseable value
       // is ignored per RFC 9110 §13.1.3.

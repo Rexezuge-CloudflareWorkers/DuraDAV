@@ -2,6 +2,7 @@ import { Tokens } from '@durable-dav/backend-services/composition';
 import type { DavVolumeRow } from '@durable-dav/backend-data/dao';
 import { readDavHrefPrefixMode } from '@durable-dav/shared/constants';
 import type { DavHrefPrefixMode } from '@durable-dav/shared/constants';
+import { ErrorSanitizationUtil } from '@durable-dav/shared/utils';
 import { BaseRoute } from '@/endpoints/IBaseRoute';
 import type { ApiApp, ApiContext } from '@/types/ApiContext';
 import { getVolumeStub } from '../doStubs';
@@ -101,7 +102,7 @@ async function listOwnedVolumes(scope: ReturnType<typeof BaseRoute.getScope>, us
       // silently-wrong volume list is hard to notice from the outside.
       console.warn('id-keyed volume list failed; falling back to the address path', {
         userId,
-        error: error instanceof Error ? (error.stack ?? error.message) : error,
+        error: ErrorSanitizationUtil.stackForLog(error),
       });
     }
   }
@@ -172,7 +173,7 @@ class DeleteVolume extends VolumeScopedRoute {
       console.error('Volume DO cleanup failed after D1 delete', {
         owner: row.owner,
         volume: row.name,
-        error: error instanceof Error ? (error.stack ?? error.message) : error,
+        error: ErrorSanitizationUtil.stackForLog(error),
       });
     }
     const cache = scope.get(Tokens.KvCache);

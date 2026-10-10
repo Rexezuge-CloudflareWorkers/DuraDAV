@@ -1,4 +1,3 @@
-export const DEFAULT_DEBUG_MODE = 'false';
 export const DEFAULT_ENVIRONMENT = 'production';
 export const DEFAULT_SITE_URL = '';
 export const DEFAULT_MAX_VOLUMES_PER_USER = '100';

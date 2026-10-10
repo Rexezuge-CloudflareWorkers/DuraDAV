@@ -25,6 +25,16 @@ import type { D1Queryable } from '../utils';
 
 type ReplicationRunStatus = 'ok' | 'partial' | 'failed';
 
+/**
+ * The `last_error` cap.
+ *
+ * Duplicated from `backend-services`'s `STORED_ERROR_LENGTH` rather than imported:
+ * `backend-data` is Layer 2 and may not import Layer 3. The caller's value is
+ * *already* clamped by `truncateReplicationError`, so this clamp never actually
+ * shortens anything — it exists so a directly-written DAO call cannot put an
+ * unbounded string in the column. `test/replication-error-length.test.ts` pins
+ * the two constants to the same number, so they cannot drift apart silently.
+ */
 const MAX_STORED_ERROR_LENGTH = 500;
 
 /**

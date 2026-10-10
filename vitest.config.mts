@@ -48,15 +48,24 @@ export default defineConfig({
         // testing could move the number. It is now measured.
         //
         // One enforced global floor, raised 28/23/36/30 (pre-hardening) →
-        // 35/31/41/36 → 43/39/50/44 → the current 46/41/52/47. Vitest applies
-        // glob-scoped thresholds per *file* rather than per directory aggregate,
-        // so a per-area floor here would compare every individual module against
-        // it. Separate backend and web floors would need separate Vitest
-        // projects. Never lower to make CI pass.
-        statements: 46,
-        branches: 41,
-        functions: 52,
-        lines: 47,
+        // 35/31/41/36 → 43/39/50/44 → 46/41/52/47 → the current 59/55/61/60.
+        // The last step came from unit-testing `apps/background/src/dav/methods/*`
+        // (466 lines of RFC 4918 semantics that had been 0% and were reachable
+        // only over HTTP from the workerd suite, hence invisible to this gate)
+        // plus the browser plane's transport and hooks.
+        //
+        // Vitest applies glob-scoped thresholds per *file* rather than per
+        // directory aggregate, so a per-area floor here would compare every
+        // individual module against it. Separate backend and web floors would
+        // need separate Vitest projects. Never lower to make CI pass.
+        //
+        // Set a hair under the measured 59.78/56.78/61.28/60.93 so an unrelated
+        // deletion of a few uncovered lines cannot fail CI, but not so far below
+        // that a real regression passes.
+        statements: 59,
+        branches: 55,
+        functions: 61,
+        lines: 60,
       },
     },
   },
