@@ -32,5 +32,10 @@
     // request reaches the filesystem instead of being refused by the per-file cap
     // first. The production default is 5 GB, which no test could reach.
     "DO_DEVICE_BYTES": "4194304",
+    // A fixed 32-byte base64 key, so a test can decrypt what the API sealed and
+    // assert on the plaintext. `dav-volume` targets never touch it — they go over DO
+    // RPC with no credential — so without this the `dav` transport's credential path
+    // is unreachable from integration tests entirely.
+    "REPLICATION_ENCRYPTION_KEY": "4TvmnrKMuQV1Yt2yFGbjaOgN5TDqF48yMxhuwJ7q63k=",
   },
 }

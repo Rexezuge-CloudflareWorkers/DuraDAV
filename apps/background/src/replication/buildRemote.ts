@@ -45,8 +45,19 @@ function allowedHosts(config: AppConfiguration): string[] {
  */
 function authHeader(authKind: string, secret: string): RemoteAuth {
   if (authKind === 'basic') {
+    // First colon, per RFC 7617 — so a password may contain colons and still
+    // round-trip. Only the username is restricted, and `sealableSecret` refuses one
+    // at write time rather than letting it throw here under a misleading name.
     const separator = secret.indexOf(':');
-    if (separator === -1) throw new RemoteUnavailableError('stored replication credential is malformed; rotate it');
+    if (separator === -1) {
+      // No colon means the blob was sealed without the `user:` prefix. That is a
+      // *format* fault, not a wrong password: the build that wrote it dropped the
+      // username, so no credential the owner supplies can ever fix it. Saying "rotate
+      // it" sent owners through a loop — every rotation re-sealed the same bare
+      // password and failed identically. The remedy is to re-enter the credential
+      // (username and password) for this target, which is what "re-enter" says.
+      throw new RemoteUnavailableError('stored replication credential is in an unreadable format; re-enter the username and password for this target');
+    }
     return { kind: 'basic', value: basicAuthValue(secret.slice(0, separator), secret.slice(separator + 1)) };
   }
   return authKind === 'bearer' ? { kind: 'bearer', token: secret } : { kind: 'none' };

@@ -33,6 +33,10 @@ function statusLabel(t: (key: string, fallback: string) => string, status: Bucke
  * looks the way it does, because the alternative is a list of badges a user cannot
  * act on: an open pass means deletions are deliberately held back, and a run of
  * failures means the target has probably been auto-disabled.
+ *
+ * A `<div>`, not the `<li>` it used to be: the card now wraps each row together with
+ * its credential form in one `<li>`, and a list item nested inside a list item is
+ * invalid HTML that browsers silently re-parent.
  */
 export function VolumeReplicationRow({
   replication,
@@ -40,6 +44,7 @@ export function VolumeReplicationRow({
   onSyncNow,
   onToggle,
   onShowDecisions,
+  onRotateCredential,
   onRemove,
 }: {
   replication: BucketReplication;
@@ -47,11 +52,12 @@ export function VolumeReplicationRow({
   onSyncNow: () => void;
   onToggle: () => void;
   onShowDecisions: () => void;
+  onRotateCredential: () => void;
   onRemove: () => void;
 }) {
   const { t } = useTranslation();
   return (
-    <li className="rounded-md border border-[var(--color-border)] p-3 space-y-2">
+    <div className="rounded-md border border-[var(--color-border)] p-3 space-y-2">
       <div className="flex items-start justify-between gap-3 flex-wrap">
         <div className="min-w-0">
           <p className="text-sm font-medium text-[var(--color-text-primary)] break-all">{targetLabel(replication)}</p>
@@ -108,10 +114,20 @@ export function VolumeReplicationRow({
         <Button size="sm" variant="secondary" onClick={onShowDecisions}>
           {t('replication.showConflicts', 'Show Decisions')}
         </Button>
+        {/*
+          Only for a `dav` target: a `dav-volume` target is reached over DO RPC and
+          carries no credential, so a rotate control there would promise something the
+          server has no field to store.
+        */}
+        {replication.targetKind === 'dav' && (
+          <Button size="sm" variant="secondary" onClick={onRotateCredential}>
+            {t('replication.rotateCredential', 'Update Credential')}
+          </Button>
+        )}
         <Button size="sm" variant="danger" onClick={onRemove}>
           {t('replication.remove', 'Remove')}
         </Button>
       </div>
-    </li>
+    </div>
   );
 }

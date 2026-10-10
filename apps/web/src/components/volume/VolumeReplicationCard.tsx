@@ -17,6 +17,7 @@ import { RefreshButton } from '../shared/RefreshButton';
 import { ConfirmDeleteModal } from '../modals/ConfirmDeleteModal';
 import { VolumeReplicationRow } from './VolumeReplicationRow';
 import { VolumeReplicationForm } from './VolumeReplicationForm';
+import { VolumeReplicationCredentialForm } from './VolumeReplicationCredentialForm';
 import { VolumeReplicationDecisions } from './VolumeReplicationDecisions';
 
 /**
@@ -59,6 +60,14 @@ export function VolumeReplicationCard({
   const [reloadKey, setReloadKey] = useState(0);
   const [busyId, setBusyId] = useState<string | null>(null);
   const [removing, setRemoving] = useState<BucketReplication | null>(null);
+  /**
+   * The target whose credential form is open, if any.
+   *
+   * At most one: two forms on screen at once invite the owner into re-entering a
+   * password into the wrong target, and the stored values are never readable back, so
+   * a mistake there is not self-evident.
+   */
+  const [rotatingId, setRotatingId] = useState<string | null>(null);
 
   const refresh = useCallback(() => {
     setLoading(true);
@@ -185,15 +194,29 @@ export function VolumeReplicationCard({
         {replications.length > 0 ? (
           <ul className="space-y-3">
             {replications.map((replication) => (
-              <VolumeReplicationRow
-                key={replication.replicationId}
-                replication={replication}
-                busy={busyId === replication.replicationId}
-                onSyncNow={() => void syncNow(replication)}
-                onToggle={() => void toggle(replication)}
-                onShowDecisions={() => void loadConflicts(replication.replicationId)}
-                onRemove={() => setRemoving(replication)}
-              />
+              <li key={replication.replicationId} className="space-y-2">
+                <VolumeReplicationRow
+                  replication={replication}
+                  busy={busyId === replication.replicationId}
+                  onSyncNow={() => void syncNow(replication)}
+                  onToggle={() => void toggle(replication)}
+                  onShowDecisions={() => void loadConflicts(replication.replicationId)}
+                  onRotateCredential={() => setRotatingId(replication.replicationId)}
+                  onRemove={() => setRemoving(replication)}
+                />
+                {rotatingId === replication.replicationId && (
+                  <VolumeReplicationCredentialForm
+                    owner={owner}
+                    volume={volume}
+                    replication={replication}
+                    showNotice={showNotice}
+                    onDone={() => {
+                      setRotatingId(null);
+                      refresh();
+                    }}
+                  />
+                )}
+              </li>
             ))}
           </ul>
         ) : (
