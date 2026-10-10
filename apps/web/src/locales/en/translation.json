@@ -197,6 +197,7 @@
     "failedToLoadReplications": "Failed To Load Replications.",
     "failedToCreateReplication": "Failed To Add Replication.",
     "failedToUpdateReplication": "Failed To Update Replication.",
+    "failedToUpdateReplicationCredential": "Failed To Update Credential.",
     "failedToDeleteReplication": "Failed To Remove Replication.",
     "failedToRunReplication": "Failed To Run Sync.",
     "failedToResolveConflict": "Failed To Mark Resolved."
@@ -247,6 +248,9 @@
     "passInFlight": "A Sync Pass Is In Progress. Deletions Propagate Only After A Pass Finishes Without Errors.",
     "consecutiveFailures": "{{count}} Consecutive Failed Attempts",
     "showConflicts": "Show Decisions",
+    "rotateCredential": "Update Credential",
+    "saveCredential": "Save Credential",
+    "credentialUpdated": "Credential Updated.",
     "decisions": "Recorded Decisions",
     "conflictResolved": "Both Sides Changed. {{winner}} Side Was Kept.",
     "deletionPropagated": "Deletion Propagated. {{winner}} Side Was Removed.",

@@ -96,6 +96,32 @@ export async function updateReplication(
   return data.replication;
 }
 
+/**
+ * Replace a target's stored credential.
+ *
+ * Separate from `updateReplication` on the server too, deliberately: this is the one
+ * update that rewrites the secret envelope, so it must never be expressible as a field
+ * on a settings patch.
+ *
+ * `username` is required again for `basic` even when only the password changed. The
+ * username lives inside the sealed blob as the `user:` prefix rather than in a column
+ * of its own, so the server cannot carry it across a rotation — it would have to
+ * decrypt the old credential to re-seal it, which fails precisely when an owner
+ * reaches for this (the credential stopped working).
+ */
+export async function rotateReplicationCredential(
+  owner: string,
+  volume: string,
+  replicationId: string,
+  input: { authKind?: 'none' | 'basic' | 'bearer'; username?: string; secret?: string },
+): Promise<BucketReplication> {
+  const data = await apiPost<{ replication: BucketReplication }>(
+    `${replicationBase(owner, volume)}/${encodeURIComponent(replicationId)}/credential`,
+    input,
+  );
+  return data.replication;
+}
+
 export async function deleteReplication(owner: string, volume: string, replicationId: string): Promise<void> {
   await apiDelete<{ ok: boolean }>(`${replicationBase(owner, volume)}/${encodeURIComponent(replicationId)}`);
 }

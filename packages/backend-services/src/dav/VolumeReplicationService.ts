@@ -15,7 +15,6 @@ import {
   optionalString,
   requireRemoteUrl,
   MAX_NAME_LENGTH,
-  MAX_SECRET_LENGTH,
   REPLICATION_AUTH_KINDS,
   REPLICATION_INTERVALS,
   REPLICATION_MODES,
@@ -23,6 +22,7 @@ import {
   readMirrorDeletions,
 } from './replicationInput';
 import type { ReplicationAuthKind, ReplicationCreateInput, ReplicationPatchInput } from './replicationInput';
+import { buildCredentialEnvelope, credentialPlaintext } from './replicationCredential';
 
 interface VolumeReplicationServiceEnv {
   DB: D1Queryable;
@@ -148,13 +148,10 @@ class VolumeReplicationService {
       }
     }
 
-    const secret = authKind === 'none' ? '' : optionalString(input.secret, 'secret', MAX_SECRET_LENGTH);
-    if (authKind !== 'none' && secret === '') {
-      throw new BadRequestError(`secret is required when authKind is ${authKind}`);
-    }
-    if (authKind === 'basic' && optionalString(input.username, 'username', MAX_NAME_LENGTH) === '') {
-      throw new BadRequestError('username is required when authKind is basic');
-    }
+    // Validated here rather than at the write below, so a body that is both over quota
+    // and missing its username still reports the credential — the ordering callers
+    // already saw, and the one that names the field they have to fix.
+    const sealed = credentialPlaintext(authKind, input.username, input.secret);
 
     const used = await dao.countByVolume(volumeId);
     if (used >= this.deps.config.getMaxReplicationsPerVolume()) {
@@ -168,7 +165,7 @@ class VolumeReplicationService {
       throw new BadRequestError('This target is already configured for this volume');
     }
 
-    const envelope = secret === '' ? { ciphertext: null, iv: null } : await this.seal(secret);
+    const envelope = sealed === '' ? { ciphertext: null, iv: null } : await this.seal(sealed);
     const now = TimestampUtil.getCurrentUnixTimestampInSeconds();
     const replicationId = UUIDUtil.getRandomUUID();
     await dao.create({
@@ -229,6 +226,12 @@ class VolumeReplicationService {
    *
    * Allowed without touching the base, because the target is the same server —
    * only the way this Worker authenticates to it changed.
+   *
+   * The username is re-sent rather than preserved from the existing row: it lives
+   * *inside* the sealed blob, so keeping it would mean decrypting the old credential
+   * with the encryption key on every rotation purely to re-seal it — and a rotation
+   * that cannot complete without the key working fails in exactly the situation an
+   * owner reaches for it.
    */
   public async rotateSecret(
     volumeId: string,
@@ -238,9 +241,9 @@ class VolumeReplicationService {
     const dao = await this.deps.replicationDAO();
     const existing = await this.requireReplication(volumeId, replicationId);
     const authKind = oneOf(input.authKind, REPLICATION_AUTH_KINDS, 'authKind', existing.auth_kind === 'none' ? undefined : (existing.auth_kind as ReplicationAuthKind));
-    const secret = optionalString(input.secret, 'secret', MAX_SECRET_LENGTH);
-    if (authKind !== 'none' && secret === '') throw new BadRequestError(`secret is required when authKind is ${authKind}`);
-    const envelope = secret === '' ? { ciphertext: null, iv: null } : await this.seal(secret);
+    // Validated and sealed in one step here, unlike create which validates before its
+    // quota and duplicate-target checks: rotation has no such checks to order against.
+    const envelope = await buildCredentialEnvelope(authKind, input.username, input.secret, (plaintext) => this.seal(plaintext));
     await dao.setSecret(replicationId, envelope.ciphertext, envelope.iv, TimestampUtil.getCurrentUnixTimestampInSeconds());
     const updated = await dao.getById(replicationId);
     if (!updated) throw new NotFoundError('Replication not found after credential update');

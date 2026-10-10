@@ -36,6 +36,9 @@ pnpm exec wrangler dev --config ./wrangler.jsonc
 
 # ops: change a user's sign-in address (see migrations/0004_user_identity.sql)
 pnpm exec tsx scripts/change-email.ts --db durable-dav-db --account <email|username> --to <new-email> [--dry-run] [--remote]
+
+# ops: find `basic` replication targets whose stored credential predates the fix (read-only)
+pnpm exec tsx scripts/replication-credential-audit.ts --db durable-dav-db [--remote]
 ```
 
 No committed `wrangler.jsonc` secrets. God-file guard 300/400 warn-only; currently **ten** files just over 300, none a god file: `ReplicationRunner` 325, `DavRepository` 324, `DavVolumeWorker` 322, `useVolumeMutations` 313, `DavHttpRemote` 308, `buildReplicationPlan` 308, `DavReadCache` 306, `VolumeView` 306, `DavReplicationDAO` 304, and the `test/helpers/dav-fakes.ts` fixture. `DavHttpRemote` is the one cohesive HTTP transport with its protocol constants already in `davHttpProtocol`. The replication feature added seven over the line and every one has since been split back out (`replicationInput`, `buildRemote`, `replicaOperations`, `recursiveDelete`, `replicationProjection`, `replicationPassSql`, and — when `pull-only` arrived — `planTransfers`, which took the two conflict strategies out of `PlanExecutor` rather than growing it) — the split is the point, because a sync engine's rules are only auditable if each rule sits in the one module that owns it. Coverage floors 59/56/61/60 (measured), enforced at 59/55/61/60 — raise, never lower.

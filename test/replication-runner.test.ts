@@ -175,6 +175,7 @@ function build(options: {
   remote?: LocalReplicaStub & { applied: Recorded[]; state: ReplicaStateRow[]; calls: Call[] };
   remoteFiles?: Record<string, string>;
   env?: Record<string, unknown>;
+  fetchImpl?: (input: string, init?: RequestInit) => Promise<Response>;
   conflictDAO?: { record: (input: unknown) => Promise<void> };
 }) {
   const row = replicationRow(options.row);
@@ -190,6 +191,8 @@ function build(options: {
   const runner = new ReplicationRunner(env as never, row, 'alice', 'demo', stub, {
     replicationDAO: dao as never,
     conflictDAO: (options.conflictDAO ?? { record: async (input: unknown) => void conflicts.push(input) }) as never,
+    // A constructor dep, not an env value — the transport's egress is injected here.
+    fetchImpl: options.fetchImpl,
   });
   return { runner, row, stub, target, dao, conflicts, env };
 }
@@ -650,8 +653,12 @@ describe('ReplicationRunner — pull-only', () => {
 });
 
 describe('ReplicationRunner — credential handling', () => {
-  it('reports a malformed stored basic credential rather than authenticating as nobody', async () => {
+  it('reports a stored basic credential in an unreadable format rather than authenticating as nobody', async () => {
     const key = generateReplicationKey();
+    // A colon-free blob: what the writer produced before it composed the `user:`
+    // prefix, and still the shape any hand-edited or corrupted row would have. The
+    // reader must refuse it — treating the whole blob as a username would send the
+    // owner's password to the remote as an identity.
     const envelope = await encryptReplicationSecret('no-colon-here', key);
     // `target_kind: 'dav'` reaches the HTTP path, but the credential is
     // rejected before any request is built — which is the point: the failure must
@@ -662,11 +669,45 @@ describe('ReplicationRunner — credential handling', () => {
     });
     const result = await runner.runSlice();
     expect(result.status).toBe('failed');
-    expect(result.error).toMatch(/malformed/);
+    // A *format* fault, so the message says so and points at re-entering the
+    // credential. It used to say "rotate it", which was a no-op: rotation re-sealed
+    // the same bare password and failed identically.
+    expect(result.error).toMatch(/unreadable format/);
     expect(dao.runs[0]?.status).toBe('failed');
   });
 
-  it('reports a decryption failure instead of skipping authentication', async () => {
+  it('authenticates a basic credential sealed with the user: prefix', async () => {
+    // The other half of the fix, and the reason the previous test was not enough:
+    // it proved the reader *refuses* a colon-free blob but never proved the reader
+    // *accepts* a correct one. A reader that refused everything would have passed it.
+    // This drives the real `buildRemote` and the real `basicAuthValue`.
+    const key = generateReplicationKey();
+    const envelope = await encryptReplicationSecret('alice:hunter2', key);
+    const seen: (string | null)[] = [];
+    const { runner } = build({
+      env: { REPLICATION_ENCRYPTION_KEY: key },
+      // Capture the header the transport would actually send.
+      fetchImpl: async (_input: string, init?: RequestInit) => {
+        seen.push(new Headers(init?.headers).get('Authorization'));
+        return new Response('<multistatus xmlns="DAV:"/>', { status: 207, headers: { 'Content-Type': 'application/xml' } });
+      },
+      row: {
+        target_kind: 'dav',
+        remote_url: 'https://dav.example.com/f',
+        auth_kind: 'basic',
+        encrypted_secret: envelope.ciphertext,
+        secret_iv: envelope.iv,
+      },
+    });
+    await runner.runSlice();
+    // RFC 7617: base64 of `user:password`. Decoding it back is the assertion that
+    // matters — it pins the halves, not just the presence of a header.
+    const header = seen.find((value) => value !== null);
+    expect(header).toBeDefined();
+    expect(atob(String(header).replace('Basic ', ''))).toBe('alice:hunter2');
+  });
+
+it('reports a decryption failure instead of skipping authentication', async () => {
     // Reporting it as `failed` is correct; skipping auth would let the remote
     // answer 401 and the owner would debug a key problem as a target problem.
     const envelope = await encryptReplicationSecret('user:pw', generateReplicationKey());

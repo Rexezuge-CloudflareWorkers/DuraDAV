@@ -114,6 +114,47 @@ function optionalString(value: unknown, field: string, maxLength: number): strin
   return trimmed;
 }
 
+/**
+ * The plaintext that gets sealed for a target's credential.
+ *
+ * `basic` needs both halves and there is exactly one column to put them in, so the
+ * username travels as the `user:` prefix — matching how a client sends it and keeping
+ * one secret in one column. `buildRemote`'s `authHeader` splits on the **first** colon,
+ * which is the RFC 7617 rule, so a password may itself contain colons and still
+ * round-trip; only the username is restricted.
+ *
+ * This function is the whole reason `basic` replication works. It was previously
+ * absent: `createReplication` and `rotateSecret` both validated that a username was
+ * present and then sealed the bare password without it, so every stored credential was
+ * colon-free and every sync failed with "stored replication credential is malformed".
+ * The read side was right all along and had no writer to feed it.
+ */
+function sealableSecret(authKind: string, username: string, secret: string): string {
+  if (authKind !== 'basic') return secret;
+  // RFC 7617 forbids a colon in the user-id, because the first colon is the separator.
+  // Refused here rather than left to `basicAuthValue` throwing at sync time: this is
+  // knowable from the request, and a 400 naming the field beats a target that fails
+  // every pass with an error about a character the owner cannot see.
+  if (username.includes(':')) throw new BadRequestError('username must not contain ":"');
+  return `${username}:${secret}`;
+}
+
+/**
+ * A credential value, which is **not** trimmed.
+ *
+ * `optionalString` trims because every other field in this contract is an identifier
+ * or a URL where surrounding whitespace is noise. A password is opaque octets: RFC 7617
+ * puts everything after the first colon into the password verbatim, so trimming silently
+ * changes the credential the owner chose and turns a correct one into a 401. Length is
+ * still bounded — it is what reaches `crypto.subtle.encrypt`.
+ */
+function optionalSecret(value: unknown, field: string): string {
+  if (value === undefined || value === null) return '';
+  if (typeof value !== 'string') throw new BadRequestError(`${field} must be a string`);
+  if (value.length > MAX_SECRET_LENGTH) throw new BadRequestError(`${field} must be at most ${MAX_SECRET_LENGTH} characters`);
+  return value;
+}
+
 function optionalBoolean(value: unknown, field: string, fallback: boolean): boolean {
   if (value === undefined || value === null) return fallback;
   if (typeof value !== 'boolean') throw new BadRequestError(`${field} must be a boolean`);
@@ -176,10 +217,12 @@ export {
   normalizeInterval,
   oneOf,
   optionalBoolean,
+  optionalSecret,
   readMirrorDeletions,
   MIRROR_DELETION_MODE,
   optionalString,
   requireRemoteUrl,
+  sealableSecret,
   MAX_NAME_LENGTH,
   MAX_SECRET_LENGTH,
   REPLICATION_INTERVALS,
